@@ -235,7 +235,10 @@ fn double_settle_errors_and_first_payout_untouched() {
     let bot = Address::generate(&s.env);
     s.keeper.settle(&bot, &series_id);
     let buyer_balance_after_first = s.token.balance(&buyer);
-    assert!(buyer_balance_after_first > 0);
+    // Minted 1000, paid premium 10 (spot 100 vs strike 90, vol ~0), then
+    // received the call's intrinsic payout of 30 (120 - 90) at settle:
+    // 1000 - 10 + 30 = 1020.
+    assert_eq!(buyer_balance_after_first, 1_020_0000000i128);
 
     let result = s.keeper.try_settle(&bot, &series_id);
     assert_eq!(result, Err(Ok(Error::AlreadySettled)));
@@ -265,8 +268,9 @@ fn full_lifecycle_pays_itm_holder_and_keeper_reward() {
     // on top of their post-buy balance.
     assert_eq!(s.token.balance(&buyer), buyer_balance_after_buy + 30_0000000i128);
 
+    // Keeper reward: 5% (KEEPER_REWARD_BPS) of total_payout (30) = 1.5.
     let bot_balance_after = s.token.balance(&bot);
-    assert!(bot_balance_after > bot_balance_before, "keeper reward should be paid");
+    assert_eq!(bot_balance_after, bot_balance_before + 1_5000000i128);
 
     let is_settleable_after = s.keeper.is_settleable(&series_id);
     assert!(!is_settleable_after);

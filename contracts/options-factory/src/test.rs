@@ -89,7 +89,8 @@ fn create_series_is_permissionless() {
     // any account submitting the tx can call it once the grid slot exists.
     let s = setup();
     let series_id = s.factory.create_series(&s.asset, &80_0000000i128, &s.weekly_expiry);
-    assert!(series_id > 0);
+    // First series in a fresh setup(): NextSeriesId starts at 1.
+    assert_eq!(series_id, 1u64);
 }
 
 #[test]

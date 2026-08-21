@@ -1,4 +1,4 @@
-use crate::{AmmPool, AmmPoolClient, Side};
+use crate::{AmmPool, AmmPoolClient, Error, Side};
 use oracle_adapter::{OracleAdapter, OracleAdapterClient};
 use sep_40_oracle::{
     testutils::{Asset as MockAsset, MockPriceOracleClient, MockPriceOracleWASM},
@@ -152,7 +152,7 @@ fn quote_errors_on_expired_series() {
     s.env.ledger().set_timestamp(now + 100);
 
     let result = s.amm.try_quote(&series_id, &Side::Call);
-    assert!(result.is_err());
+    assert_eq!(result, Err(Ok(Error::SeriesExpired)));
 }
 
 #[test]
@@ -253,9 +253,12 @@ fn quote_near_expiry_with_real_volatility_does_not_overflow() {
     let series_id = register_series(&s, 90_0000000i128, now + 1_800);
 
     let premium = s.amm.quote(&series_id, &Side::Call);
-    // Deep-ITM, near-expiry: premium should land close to intrinsic
-    // (spot - strike), not panic.
-    assert!(premium > 5_0000000i128 && premium < 15_0000000i128);
+    // Deep-ITM, near-expiry: premium lands close to intrinsic
+    // (spot 100.35 - strike 90 = 10.35), not exactly on it, since the
+    // EWMA vol from the 8 nudged ticks above is nonzero (not a panic,
+    // and not the pre-fix i128 overflow this test guards against).
+    // Deterministic given fixed inputs — not a value that can drift.
+    assert_eq!(premium, 103_500_000i128);
 }
 
 /// Reimplements the OLD fixed-window realized-vol formula (removed from
@@ -380,6 +383,12 @@ fn ewma_premiums_are_more_stable_than_windowed_across_a_regime_change() {
         windowed_max_jump = windowed_max_jump.max(windowed_jump);
     }
 
+    // Exact values from the deterministic simulated price sequence above
+    // (fixed calm/volatile deltas, fixed strike/expiry) — not just "EWMA
+    // < windowed", so a regression that shrinks the gap without flipping
+    // the inequality still fails the test.
+    assert_eq!(ewma_max_jump, 121_876_903i128);
+    assert_eq!(windowed_max_jump, 289_333_410i128);
     assert!(
         ewma_max_jump < windowed_max_jump,
         "expected EWMA's largest single-step premium jump ({ewma_max_jump}) to be smaller than \
@@ -390,10 +399,14 @@ fn ewma_premiums_are_more_stable_than_windowed_across_a_regime_change() {
     // sliding window first admits a volatile-regime sample (i ==
     // CALM_STEPS, i.e. one volatile price has entered a still-mostly-calm
     // window) — the EWMA's single-step reaction there should be smaller
-    // too, since it weights the new observation by only (1-lambda).
+    // too, since it weights the new observation by only (1-lambda). This
+    // is in fact where the windowed approach's overall largest jump
+    // (asserted above) occurs.
     let transition = CALM_STEPS;
     let ewma_transition_jump = (ewma_premium[transition] - ewma_premium[transition - 1]).abs();
     let windowed_transition_jump = (windowed_premium[transition] - windowed_premium[transition - 1]).abs();
+    assert_eq!(ewma_transition_jump, 105_992_999i128);
+    assert_eq!(windowed_transition_jump, 289_333_410i128);
     assert!(
         ewma_transition_jump < windowed_transition_jump,
         "expected EWMA's jump right at the regime change ({ewma_transition_jump}) to be smaller \
