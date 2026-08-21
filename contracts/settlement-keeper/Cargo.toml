@@ -1,0 +1,27 @@
+[package]
+name = "settlement-keeper"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+sep-40-oracle = { workspace = true }
+oracle-adapter = { path = "../oracle-adapter", default-features = false }
+vault-accounting = { path = "../vault-accounting", default-features = false }
+options-factory = { path = "../options-factory", default-features = false }
+amm-pool = { path = "../amm-pool", default-features = false }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+sep-40-oracle = { workspace = true, features = ["testutils"] }
+oracle-adapter = { path = "../oracle-adapter", features = ["testutils"] }
+vault-accounting = { path = "../vault-accounting", features = ["testutils"] }
+amm-pool = { path = "../amm-pool", features = ["testutils"] }
+options-factory = { path = "../options-factory", features = ["testutils"] }
+
+[features]
+testutils = ["soroban-sdk/testutils"]
