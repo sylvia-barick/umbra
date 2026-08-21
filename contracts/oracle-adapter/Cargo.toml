@@ -1,0 +1,26 @@
+[package]
+name = "oracle-adapter"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+sep-40-oracle = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+sep-40-oracle = { workspace = true, features = ["testutils"] }
+
+[features]
+default = ["contract"]
+# The full #[contract] impl, exporting this crate's own wasm entry points.
+# Cross-contract callers depend on this crate with default-features = false
+# to get only the lightweight client (see the cfg split in src/lib.rs) —
+# avoiding duplicate wasm-export symbols when linked into another
+# contract's binary.
+contract = []
+testutils = ["soroban-sdk/testutils"]

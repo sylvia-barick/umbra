@@ -70,7 +70,7 @@ Every contract defines its own `#[contracterror]` enum, `#[repr(u32)]`, numbered
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
-    NotInitialized = 1,
+    NotAuthorized = 1,
     StalePrice = 2,
     InsufficientCollateral = 3,
     // ...
@@ -176,7 +176,10 @@ LP deposits, share accounting, and collateral custody backing open option positi
 | deposit | `from: Address, amount: i128` | `i128` (shares minted) | ZeroAmount |
 | withdraw | `from: Address, shares: i128` | `i128` (amount paid) | InsufficientFreeCollateral, InsufficientShares |
 | lock_collateral | `caller: Address, amount: i128` | `()` | NotAuthorized, InsufficientFreeCollateral |
+| credit_collateral | `caller: Address, from: Address, amount: i128` | `()` | NotAuthorized, ZeroAmount |
 | release_collateral | `caller: Address, amount: i128, payout: i128` | `()` | NotAuthorized |
+| pay_from_free | `caller: Address, to: Address, amount: i128` | `()` | NotAuthorized, InsufficientFreeCollateral |
+| add_authorized_caller | `admin: Address, caller: Address` | `()` | NotAuthorized |
 | share_price | — | `i128` | — |
 
 ### Events
@@ -220,23 +223,40 @@ K  = strike, fixed at series creation
 
 **On-chain N(x) approximation.** Soroban has no floating point. N(x) (the standard normal CDF) is computed via a fixed-point rational approximation (Abramowitz–Stegun 26.2.17 or equivalent), or — given v1's fixed weekly/monthly expiry grid bounds the range of realistic moneyness — a precomputed lookup table indexed by discretized d1/d2 buckets, linearly interpolated. The lookup table is the cheaper option in compute units and is the recommended default; the rational approximation is the fallback if bucket resolution proves too coarse in testing.
 
+*Implementation note:* v1 ships the rational-approximation fallback (Abramowitz–Stegun 26.2.17), not the lookup table — simpler to implement correctly and to unit-test against closed-form sanity checks (`N(0) = 0.5`, symmetry, tail behavior) without needing to pre-generate and validate a bucket table. `ln`, `exp`, and `sqrt` are hand-rolled fixed-point helpers (`contracts/amm-pool/src/math.rs`, 1e9 internal scale) since Soroban's `no_std` environment has none of these available. Revisit the lookup table if the rational approximation's compute-unit cost proves too high in practice.
+
+*MVP simplification — call notional bound:* the pool locks `strike × size` as collateral per contract regardless of side. This is exact for puts (max payout is bounded by strike) but is a cap, not the true unbounded upside, for calls — a spot price more than 2× the strike at settlement pays out capped at the locked notional rather than true intrinsic value. Flagged here in the same spirit as the `r = 0` simplification above; revisit before mainnet if deep ITM calls are expected to be common.
+
 ### Storage
 
 | Key | Type | Kind | Description |
 |---|---|---|---|
+| Admin | `Address` | instance | Can call `set_factory` / `set_settlement`. |
 | OracleAddr | `Address` | instance | `oracle-adapter` contract. |
 | VaultAddr | `Address` | instance | `vault-accounting` contract. |
+| TokenAddr | `Address` | instance | Collateral asset — must match `vault-accounting`'s, needed to forward `sell()` proceeds. |
+| FactoryAddr | `Address` | instance | The one caller authorized to call `register_series` — set post-deployment since `options-factory` doesn't exist yet when `amm-pool` is deployed. |
+| SettlementAddr | `Address` | instance | The one caller authorized to call `close_position` — set post-deployment for the same reason. |
 | FeeBps | `u32` | instance | Protocol fee on premiums, basis points. |
-| Position(holder, series_id) | struct | persistent | Keyed by holder address + series_id: side, size, premium paid. |
+| SeriesMeta(series_id) | struct | persistent | underlying, strike, expiry — pushed here by `options-factory.create_series` via `register_series`, since `amm-pool` has no dependency back on `options-factory`'s own storage. |
+| Position(holder, series_id, side) | struct | persistent | size, premium_paid. |
 | OpenInterest(series_id) | `i128` | persistent | Total notional open per series_id — read by `vault-accounting`'s risk checks indirectly via lock amounts. |
+| HoldersBySeries(series_id) | `Vec<Address>` | persistent | Every distinct address that has bought either side of a series — `settlement-keeper`'s only way to discover who to pay out, since Soroban storage has no native enumeration. |
 
 ### Interface
 
 | Function | Params | Returns | Errors |
 |---|---|---|---|
+| set_factory | `admin: Address, factory: Address` | `()` | NotAuthorized |
+| set_settlement | `admin: Address, settlement: Address` | `()` | NotAuthorized |
+| is_underlying_supported | `underlying: Asset` | `bool` | — |
+| register_series | `caller: Address, series_id: u64, underlying: Asset, strike: i128, expiry: u64` | `()` | NotAuthorized, UnderlyingNotSupported, DuplicateSeries |
 | quote | `series_id: u64, side: Side` | `i128` (premium) | SeriesNotFound, SeriesExpired |
 | buy | `buyer: Address, series_id: u64, side: Side, size: i128, max_premium: i128` | `i128` (premium paid) | SlippageExceeded, InsufficientFreeCollateral |
 | sell | `seller: Address, series_id: u64, side: Side, size: i128, min_premium: i128` | `i128` | SlippageExceeded, NoOpenPosition |
+| get_position | `holder: Address, series_id: u64, side: Side` | `Position` | — |
+| holders_of_series | `series_id: u64` | `Vec<Address>` | — |
+| close_position | `caller: Address, holder: Address, series_id: u64, side: Side` | `Position` (pre-close) | NotAuthorized |
 
 ### Events
 
@@ -263,7 +283,8 @@ Creates and registers option series on a fixed strike/expiry grid; the catalog `
 | Key | Type | Kind | Description |
 |---|---|---|---|
 | Admin | `Address` | instance | Approves new underlyings and expiry-grid changes. |
-| Series(series_id) | `SeriesInfo` | persistent | strike, expiry, created_at, underlying. |
+| NextSeriesId | `u64` | instance | Monotonic counter. |
+| Series(series_id) | `SeriesInfo` | persistent | underlying, strike, expiry, created_at. |
 | SeriesByUnderlying(Asset) | `Vec<u64>` | persistent | Index for `list_series`. |
 | ApprovedExpiries | `Vec<u64>` | instance | Allowed expiry timestamps — the fixed weekly/monthly grid from the PRD's MVP scope. |
 
@@ -298,8 +319,9 @@ Handles exercise/expiry settlement — the contract the off-chain keeper bot cal
 
 | Key | Type | Kind | Description |
 |---|---|---|---|
+| OracleAddr, VaultAddr, FactoryAddr, AmmPoolAddr, TokenAddr | `Address` | instance | The four dependency addresses plus the collateral token, all set at init. |
 | Settled(series_id) | `bool` | persistent | Prevents double-settlement of a series_id. |
-| KeeperRewardBps | `u32` | instance | Share of settled premium paid to whoever calls `settle`. |
+| KeeperRewardBps | `u32` | instance | Share of settled ITM payout paid to whoever calls `settle`. |
 
 ### Interface
 

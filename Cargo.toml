@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "contracts/oracle-adapter",
+    "contracts/vault-accounting",
+    "contracts/amm-pool",
+    "contracts/options-factory",
+    "contracts/settlement-keeper",
+]
+
+[workspace.dependencies]
+soroban-sdk = "25.3.2"
+sep-40-oracle = "1.4.0"
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true
