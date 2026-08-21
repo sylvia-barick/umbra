@@ -47,14 +47,21 @@ fn setup() -> Setup {
     let mock_id = env.register_contract_wasm(None, MockPriceOracleWASM);
     let mock = MockPriceOracleClient::new(&env, &mock_id);
     mock.set_data(&admin, &mock_asset, &vec![&env, mock_asset.clone()], &7, &RESOLUTION);
-    let now = env.ledger().timestamp();
-    for i in 0..8u64 {
-        mock.set_price(&vec![&env, 100_0000000i128], &(now - (8 - i) * RESOLUTION as u64));
-    }
 
     let oracle_id = env.register(OracleAdapter, ());
     let oracle = OracleAdapterClient::new(&env, &oracle_id);
     oracle.initialize(&admin, &mock_id, &MAX_STALENESS);
+
+    // Nudge a flat 9-tick price history into the EWMA estimator (1 seed +
+    // 8 zero-return observations, clearing MIN_VOL_SAMPLES).
+    let start = env.ledger().timestamp();
+    for i in 0..9u64 {
+        let ts = start + i * RESOLUTION as u64;
+        env.ledger().set_timestamp(ts);
+        mock.set_price(&vec![&env, 100_0000000i128], &ts);
+        oracle.nudge_volatility(&asset);
+    }
+    let now = env.ledger().timestamp();
 
     let sac = env.register_stellar_asset_contract_v2(admin.clone());
     let token_addr = sac.address();

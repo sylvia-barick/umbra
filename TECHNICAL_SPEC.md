@@ -124,9 +124,11 @@ Normalizes the SEP-40 feed into Umbra's internal interface; fails closed on stal
 
 | Key | Type | Kind | Description |
 |---|---|---|---|
-| Admin | `Address` | instance | Can update `max_staleness` and the Reflector contract address. |
+| Admin | `Address` | instance | Can update `max_staleness`, the Reflector contract address, and `EwmaLambda`. |
 | ReflectorAddr | `Address` | instance | Deployed Reflector price-feed contract on the active network. |
 | MaxStaleness | `u64` | instance | Max age in seconds before a price is rejected. Suggested default: 300. |
+| EwmaLambda | `u32` | instance | EWMA decay factor, 1e-6 scale (990_000 default == 0.99). Admin-tunable via `set_ewma_lambda`. |
+| Ewma(Asset) | `EwmaState` | persistent | Per-asset incremental volatility estimator state — see below. |
 
 ### Interface
 
@@ -135,7 +137,9 @@ Normalizes the SEP-40 feed into Umbra's internal interface; fails closed on stal
 | initialize | `admin: Address, reflector: Address, max_staleness: u64` | `()` | AlreadyInitialized |
 | get_price | `asset: Asset` | `(i128, u64)` | StalePrice, PriceUnavailable |
 | get_twap | `asset: Asset, window_secs: u64` | `i128` | InsufficientHistory |
-| get_realized_vol | `asset: Asset, window_secs: u64` | `u32` (annualized, 1e-6 scale) | InsufficientHistory |
+| nudge_volatility | `asset: Asset` | `()` | PriceUnavailable |
+| get_realized_vol | `asset: Asset` | `u32` (annualized, 1e-6 scale) | InsufficientHistory |
+| set_ewma_lambda | `admin: Address, lambda: u32` | `()` | NotAuthorized, InvalidParameter |
 | decimals | — | `u32` | — |
 | set_max_staleness | `admin: Address, secs: u64` | `()` | NotAuthorized |
 
@@ -143,16 +147,39 @@ Normalizes the SEP-40 feed into Umbra's internal interface; fails closed on stal
 
 **A second, sharper version of the same trap:** `PriceScale` (the oracle's decimals) and the collateral token's own decimals are two *independent* numbers — Reflector's feed and a SEP-41 token are different assets with no relationship between their decimal counts. `amm-pool` and `settlement-keeper` both also cache a separate `TokenScale` (read from the collateral token's own `decimals()`) and rescale every notional/premium/payout value from `PriceScale` into `TokenScale` at the last possible moment, immediately before it touches `vault-accounting` or a token transfer. Conflating the two — passing a `PriceScale`-denominated value directly as a token amount — silently computed a notional 10,000,000× too large in an early testnet deployment (Reflector's 14 decimals vs. native XLM's 7): a 1,000-XLM LP pool tried to lock 1.8 million XLM for a single ~$0.18-strike contract. Caught and regression-tested (`buy_with_mismatched_oracle_and_token_decimals_computes_correct_notional` in `amm-pool`'s test suite) before mainnet consideration — worth calling out explicitly since it's the kind of bug that only surfaces once the two scales actually differ, which no amount of testing against same-scale mocks will catch.
 
+**Realized volatility: incremental EWMA, not a fixed-window recompute.** The original design (and an intermediate iteration of this spec) computed realized vol by pulling a trailing window of historical price records and recomputing variance from scratch on every `get_realized_vol` call. Verified live against testnet's Reflector CEX/DEX feed, a `prices()` call requesting more than ~20 records exceeds the transaction's resource budget (confirmed empirically: 20 records succeeds, 24 fails) — nowhere close to the 8,640 records a literal 30-day window would need, and even the 1-hour/12-record window that empirical limit forced is a statistically thin, unstable base for pricing weekly/monthly options: a fixed window's reported vol jumps in discrete steps as extreme samples abruptly enter or exit the window.
+
+`nudge_volatility` replaces this with an incrementally-updated estimator, maintained in `EwmaState` per asset:
+
+```rust
+struct EwmaState {
+    last_price: i128,
+    last_update: u64,
+    var_rate: i128,   // per-second variance rate, scaled 1e12
+    sample_count: u32,
+}
+```
+
+Each call pulls at most a single `lastprice()` — never a window — and folds the resulting return into the estimate: `var_rate = lambda * var_rate + (1 - lambda) * (return^2 / dt_seconds)`. Working in a *per-second variance rate* rather than a per-tick or per-window variance is what makes this tolerant of irregular calling intervals: since `Var(return over dt) = sigma^2 * dt` for a Brownian-motion-style price process, each observation's `return^2 / dt` is already a variance-rate sample, comparable and combinable regardless of how much real time elapsed since the last nudge — there is no dependency on the feed's `resolution()` anywhere in the calculation. `get_realized_vol` annualizes with a single multiply (`var_rate * SECONDS_PER_YEAR`) and one `isqrt`.
+
+`nudge_volatility` is permissionless — like `options-factory.create_series`, anyone (in practice, a keeper bot calling it on a regular cadence, or simply piggybacked onto other routine calls) can call it to advance the estimator. It is a safe no-op when the underlying feed hasn't ticked since the last nudge (detected via the price's own timestamp, not the caller's), so nothing is lost by nudging more often than the feed actually updates. Calling it *more* often makes the estimator's real-world memory span *shorter* per unit time, since a fixed per-call decay (`EwmaLambda`) applies each time regardless of elapsed time — `set_ewma_lambda` lets an operator retune the decay factor to match the keeper's actual cadence. The default (`0.99`, ~100 effective observations) assumes roughly one nudge per Reflector tick (~5 min), giving on the order of half a day of effective memory.
+
+`get_realized_vol` requires `MIN_VOL_SAMPLES` (8) prior return observations — i.e. at least 9 `nudge_volatility` calls, since the first only seeds the estimator — before returning a value, for the same reason the old windowed approach required a sample floor: a thin estimate is worse than an explicit error.
+
+`amm-pool`'s test suite includes a direct comparison (`ewma_premiums_are_more_stable_than_windowed_across_a_regime_change`) driving both approaches — the EWMA live through real contract calls, the old windowed formula reimplemented as a pure test-only function for a fair baseline — through an identical simulated calm-then-volatile price sequence, and asserts the EWMA-driven premium's largest single-step jump is smaller than the windowed approach's, both overall and specifically at the regime-change boundary.
+
 ### Events
 
 | Event | Topics | Data |
 |---|---|---|
 | stale_rejected | `("price","stale")` | `(asset, age_secs)` |
+| vol_nudged | `("vol","nudged")` | `(asset, var_rate, sample_count)` |
 
 ### Invariants
 
 - `get_price` never returns a price older than `MaxStaleness` — it errors instead of returning stale data.
-- `get_realized_vol` requires at least a minimum number of price samples (suggested: 8) in the window or it errors rather than computing volatility from a thin sample.
+- `get_realized_vol` requires at least `MIN_VOL_SAMPLES` (8) prior `nudge_volatility` return observations, or it errors rather than computing volatility from a thin sample.
+- `nudge_volatility` never fabricates a return: if the feed's `lastprice()` hasn't changed timestamp since the last nudge, the call is a no-op rather than recording a synthetic zero-return observation.
 
 ---
 
@@ -221,7 +248,7 @@ d1 = [ln(S/K) + (σ²/2)·T] / (σ·√T)
 d2 = d1 − σ·√T
 
 S  = spot, from oracle-adapter.get_price
-σ  = realized volatility, from oracle-adapter.get_realized_vol (1hr window — see the implementation note below; the spec's original 30d window is not executable on-chain against the live feed)
+σ  = realized volatility, from oracle-adapter.get_realized_vol — an incrementally-updated EWMA estimator, not a fixed-window recompute; see Section 05's implementation note
 T  = (expiry − now) / seconds_per_year
 K  = strike, fixed at series creation
 ```
@@ -229,8 +256,6 @@ K  = strike, fixed at series creation
 **On-chain N(x) approximation.** Soroban has no floating point. N(x) (the standard normal CDF) is computed via a fixed-point rational approximation (Abramowitz–Stegun 26.2.17 or equivalent), or — given v1's fixed weekly/monthly expiry grid bounds the range of realistic moneyness — a precomputed lookup table indexed by discretized d1/d2 buckets, linearly interpolated. The lookup table is the cheaper option in compute units and is the recommended default; the rational approximation is the fallback if bucket resolution proves too coarse in testing.
 
 *Implementation note:* v1 ships the rational-approximation fallback (Abramowitz–Stegun 26.2.17), not the lookup table — simpler to implement correctly and to unit-test against closed-form sanity checks (`N(0) = 0.5`, symmetry, tail behavior) without needing to pre-generate and validate a bucket table. `ln`, `exp`, and `sqrt` are hand-rolled fixed-point helpers (`contracts/amm-pool/src/math.rs`, 1e9 internal scale) since Soroban's `no_std` environment has none of these available. Revisit the lookup table if the rational approximation's compute-unit cost proves too high in practice.
-
-*Implementation note — realized-vol window:* verified live against testnet's Reflector CEX/DEX feed, a `prices()` call requesting more than ~20 records at the feed's 300s resolution exceeds the transaction's resource budget (confirmed empirically: 20 records succeeds, 24 fails) — well short of the 8640 records a literal 30-day window would need. `amm-pool` uses a 1-hour window (12 records) instead, comfortably clearing `oracle-adapter`'s `MIN_VOL_SAMPLES` (8) floor with margin for feed gaps. This trades off longer-horizon volatility accuracy for the window actually being executable on-chain — worth revisiting if Reflector or Soroban's resource limits change, or if a wider window turns out to be needed for pricing quality.
 
 *MVP simplification — call notional bound:* the pool locks `strike × size` as collateral per contract regardless of side. This is exact for puts (max payout is bounded by strike) but is a cap, not the true unbounded upside, for calls — a spot price more than 2× the strike at settlement pays out capped at the locked notional rather than true intrinsic value. Flagged here in the same spirit as the `r = 0` simplification above; revisit before mainnet if deep ITM calls are expected to be common.
 
@@ -360,6 +385,12 @@ Handles exercise/expiry settlement — the contract the off-chain keeper bot cal
 4. `amm-pool` calls `vault-accounting.lock_collateral(caller=amm-pool, amount=notional)` — errors here abort the whole transaction, so no partial state is possible.
 5. `amm-pool` transfers premium from buyer to `vault-accounting`'s free collateral, records the `Position`, emits `bought`.
 
+### Volatility nudging (ongoing, independent of the above)
+
+1. On a regular cadence (roughly matching the oracle feed's own tick rate — e.g. once per Reflector resolution, ~5 min), a keeper bot (or any permissionless caller) calls `oracle-adapter.nudge_volatility(asset)` for each asset with an active series.
+2. Each call pulls at most one `lastprice()` and folds the observed return into that asset's EWMA estimator — cheap enough to run indefinitely, unlike a window-based recompute. A call is a safe no-op if the feed hasn't ticked since the last nudge.
+3. `amm-pool.quote`/`buy`/`sell` read whatever `get_realized_vol` currently reports — they never nudge the estimator themselves, so pricing quality depends on this cadence actually running. A series with no recent nudges simply serves a stale-but-not-erroring vol estimate (unlike `get_price`, `get_realized_vol` has no staleness check of its own — the EWMA's decay is the only mechanism keeping it responsive).
+
 ### Settlement
 
 1. Keeper bot polls `settlement-keeper.is_settleable(series_id)` for each series past its expiry timestamp.
@@ -378,6 +409,10 @@ Minimum case coverage per contract before a sprint is considered done — not ex
 |---|---|---|
 | oracle-adapter | Price older than MaxStaleness | StalePrice error, no fallback value returned. |
 | oracle-adapter | Realized vol with < minimum samples | InsufficientHistory error. |
+| oracle-adapter | nudge_volatility called twice with no new feed tick | Second call is a no-op — no fabricated zero-return observation, sample count unchanged. |
+| oracle-adapter | nudge_volatility's first-ever call for an asset | Seeds last_price/last_update only; still InsufficientHistory until a return exists. |
+| oracle-adapter | set_ewma_lambda out of bounds (0 or ≥ 1e6) | InvalidParameter error. |
+| amm-pool | EWMA vs. windowed premium stability across a simulated calm→volatile regime change | EWMA-driven premium's largest single-step jump is smaller than the windowed formula's, both overall and at the regime-change boundary. |
 | vault-accounting | Deposit, withdraw same block | Share price unchanged; no phantom yield from round-tripping. |
 | vault-accounting | Withdraw exceeding free collateral | Queues rather than partially executing against locked funds. |
 | vault-accounting | Dust-amount deposit (1 stroop) | No rounding-to-zero share mint; either mints correctly or rejects explicitly. |

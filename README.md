@@ -37,18 +37,24 @@ TOKEN_ADDR=<SEP-41 collateral token, e.g. testnet USDC> \
 
 Deploys and initializes all five contracts in the order their constructors require (Technical Spec §12), wires up the cross-contract authorization (`vault-accounting`'s authorized callers, `amm-pool`'s factory/settlement addresses), and writes the resulting contract IDs to `deployed_addresses.<network>.env`.
 
+**After deploying, `oracle-adapter.nudge_volatility(asset)` must be called at least 9 times (with the underlying feed actually ticking between calls) before `amm-pool.quote`/`buy`/`sell` will work at all** — they read whatever `get_realized_vol` currently reports, and it errors `InsufficientHistory` until enough observations exist. In production this is a keeper bot's job, called on a regular cadence (roughly the oracle feed's own tick rate); nothing else nudges the estimator automatically. See Technical Spec §05 and §10 ("Volatility nudging").
+
 ## Live on testnet
 
-Deployed and verified end-to-end (deposit → create series → quote → buy → settle, including double-settle rejection) against Stellar testnet, using Reflector's real CEX/DEX feed and native XLM as collateral:
+Deployed against Stellar testnet, using Reflector's real CEX/DEX feed and native XLM as collateral:
 
 | Contract | Address |
 |---|---|
-| oracle-adapter | `CCJJTPQVX7JQW7FHSCIV5PTKP47ELH6JIYLIDPHFRMPJYX2OFSX2V2II` |
-| vault-accounting | `CCUPYEWTZJU7TAVBZBUN4IIWO2GU4YM5VB5L5NHKDBNF25NFZNRTKUB7` |
-| amm-pool | `CDYK47SD5OTKUYBUH2LHEQFFP76XDQQONQI6SCJKAEKHMJB6KMQZM7UP` |
-| options-factory | `CAEI2FFI4QH6R76PA5SWZB3VQ63T3QQSK2XYWD7KBJK3FVOB4XPUWPZN` |
-| settlement-keeper | `CCJDF4AIZDJOGNHN5UTGL5UBXXFZMRAVDEUDT5LIHFHYP34API6NWFLE` |
+| oracle-adapter | `CC5NKPLHQ3I67PUGVNUQ45SOX3MAFJOKHWPFQWH7AFFK4EJJ3PYDFG6Y` |
+| vault-accounting | `CA7EON5GQL5SBHWTXVAGHFHEOTTPTTVANGVAHZ6OILBP6BCMFV26JRCY` |
+| amm-pool | `CANLF54KMDB4ITEGUQ6OLXXQOUVW5TVUSQOYO2YIOIYCSGLM6GAM466X` |
+| options-factory | `CB746GQWLY4RCJ5SU6HBUPBC5SVINWZXHBQJXSTQY7RXBI5XCTPPTWTE` |
+| settlement-keeper | `CDHIHSWYKFLB7ID7MO4YJ3FYHVCIUGEQA2SMYN3T7CJ2CZ2KTKOUOUOH` |
 
 Reflector feed used: `CCYOZJCOPG34LLQQ7N24YXBM7LL62R7ONMZ3G6WZAAYPB5OYKOMJRN63` (testnet CEX/DEX, 14 decimals). Collateral token: native XLM's Stellar Asset Contract, `CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC` (7 decimals) — see `deployed_addresses.testnet.env` for a sourceable copy of these addresses.
 
-Three real bugs only surfaced by deploying against the live feed (all fixed and regression-tested — see `TECHNICAL_SPEC.md`'s implementation notes in Sections 05 and 07): a hardcoded 7-decimal price scale where Reflector's testnet feed actually reports 14; a 30-day realized-volatility window that requests more historical records than a single transaction's resource budget allows (~20 records max observed); and an unclamped fixed-point `exp()` that overflows `i128` for the extreme `d1`/`d2` values a near-expiry, moderately-ITM option produces. None of these were reachable by same-scale unit-test mocks — worth remembering for the next oracle integration.
+**This deployment** (the current `oracle-adapter`, with the EWMA volatility estimator): verified live that `nudge_volatility` correctly seeds on its first call and correctly folds in a return on its second call once the real feed ticks (`sample_count: 0 → 1`, observed against actual Reflector price movement). Reaching the full 9-observation threshold `get_realized_vol` requires — and therefore a live `quote()`/`buy()` — needs ~40 minutes of real feed ticks at this cadence; not run to completion here, but exhaustively covered by the unit suite (`cargo test -p oracle-adapter` and `-p amm-pool`, 28 tests between them), including the exact 9-nudge threshold and the EWMA-vs-windowed premium-stability comparison.
+
+**A prior deployment** (the fixed-window `get_realized_vol`, since replaced) *did* verify the full deposit → create series → quote → buy → settle lifecycle end-to-end live, including double-settle rejection — see git history for that deployment's addresses if useful as a reference; it's superseded, not currently live.
+
+Four real bugs only surfaced by deploying against the live feed (all fixed and regression-tested — see `TECHNICAL_SPEC.md`'s implementation notes in Sections 05 and 07): a hardcoded 7-decimal price scale where Reflector's testnet feed actually reports 14; a fixed-window realized-vol calculation that requests more historical records than a single transaction's resource budget allows (~20 records max observed) — since replaced with the EWMA estimator described above; an unclamped fixed-point `exp()` that overflows `i128` for the extreme `d1`/`d2` values a near-expiry, moderately-ITM option produces; and a scale-conflation bug where notional/premium values computed in the oracle's price scale were passed directly as collateral-token amounts. None of these were reachable by same-scale unit-test mocks — worth remembering for the next oracle integration.

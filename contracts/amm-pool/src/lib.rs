@@ -22,16 +22,6 @@ const LEDGER_BUMP_TO: u32 = 535_680;
 
 const SECONDS_PER_YEAR: i128 = 31_536_000;
 
-/// Trailing window used for realized-volatility lookups. The spec's
-/// original 30d window (8640 records at Reflector's 300s resolution) is
-/// impractical on-chain: verified against the live testnet feed, a
-/// `prices()` call fetching more than ~20 records exceeds the
-/// transaction's resource budget before oracle-adapter's own
-/// cross-contract overhead is even added. 1 hour (12 records) leaves
-/// comfortable headroom while still clearing MIN_VOL_SAMPLES (8) with
-/// margin for gaps in the feed.
-const REALIZED_VOL_WINDOW_SECS: u64 = 3_600;
-
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Side {
@@ -439,7 +429,7 @@ impl AmmPool {
         let oracle_addr: Address = env.storage().instance().get(&DataKey::OracleAddr).unwrap();
         let oracle = OracleAdapterClient::new(env, &oracle_addr);
         let (spot, _ts) = oracle.get_price(&info.underlying);
-        let sigma = oracle.get_realized_vol(&info.underlying, &REALIZED_VOL_WINDOW_SECS);
+        let sigma = oracle.get_realized_vol(&info.underlying);
         black_scholes(spot, info.strike, sigma, info.expiry, now, side, price_scale)
     }
 
