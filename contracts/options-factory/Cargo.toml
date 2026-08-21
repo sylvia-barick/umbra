@@ -1,0 +1,25 @@
+[package]
+name = "options-factory"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+sep-40-oracle = { workspace = true }
+amm-pool = { path = "../amm-pool", default-features = false }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+sep-40-oracle = { workspace = true, features = ["testutils"] }
+oracle-adapter = { path = "../oracle-adapter", features = ["testutils"] }
+vault-accounting = { path = "../vault-accounting", features = ["testutils"] }
+amm-pool = { path = "../amm-pool", features = ["testutils"] }
+
+[features]
+default = ["contract"]
+contract = []
+testutils = ["soroban-sdk/testutils"]
