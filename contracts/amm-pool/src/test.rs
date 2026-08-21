@@ -387,7 +387,7 @@ fn ewma_premiums_are_more_stable_than_windowed_across_a_regime_change() {
     // (fixed calm/volatile deltas, fixed strike/expiry) — not just "EWMA
     // < windowed", so a regression that shrinks the gap without flipping
     // the inequality still fails the test.
-    assert_eq!(ewma_max_jump, 121_876_903i128);
+    assert_eq!(ewma_max_jump, 39_873_270i128);
     assert_eq!(windowed_max_jump, 289_333_410i128);
     assert!(
         ewma_max_jump < windowed_max_jump,
@@ -405,7 +405,7 @@ fn ewma_premiums_are_more_stable_than_windowed_across_a_regime_change() {
     let transition = CALM_STEPS;
     let ewma_transition_jump = (ewma_premium[transition] - ewma_premium[transition - 1]).abs();
     let windowed_transition_jump = (windowed_premium[transition] - windowed_premium[transition - 1]).abs();
-    assert_eq!(ewma_transition_jump, 105_992_999i128);
+    assert_eq!(ewma_transition_jump, 30_815_169i128);
     assert_eq!(windowed_transition_jump, 289_333_410i128);
     assert!(
         ewma_transition_jump < windowed_transition_jump,

@@ -25,15 +25,18 @@ const SECONDS_PER_YEAR: u128 = 31_536_000;
 /// documented "annualized, 1e-6 scale" return).
 const RETURN_SCALE: i128 = 1_000_000;
 
-/// Default EWMA decay factor (1e-6 scale, i.e. 990_000 == 0.99), applied
-/// per nudge_volatility call. "Effective sample count" for an EWMA is
-/// ~1/(1-lambda) — 0.99 gives ~100, which at a keeper cadence of one
-/// nudge per oracle tick (~5 min on Reflector's testnet feed) works out
-/// to roughly half a day of effective memory: long enough to smooth past
-/// single-tick noise, short enough to still track a real regime change
-/// within a trading day. Admin-tunable via set_ewma_lambda since the
-/// right value depends on how often the keeper actually calls nudge.
-const DEFAULT_EWMA_LAMBDA: u32 = 990_000;
+/// Default EWMA decay factor (1e-6 scale), applied per nudge_volatility
+/// call. "Effective sample count" for an EWMA is ~1/(1-lambda); at a
+/// keeper cadence of one nudge per oracle tick (Reflector's testnet feed
+/// resolution, 300s), 8640 effective observations ~= 8640*300s = 30
+/// days — the spec's original realized-vol window intent, now reached
+/// incrementally instead of by pulling 8640 historical records in one
+/// (resource-budget-blowing) call. lambda = 1 - 1/8640 = 0.99988425...,
+/// rounded to 999_884 at this scale. Admin-tunable via set_ewma_lambda:
+/// this value is only correct for a ~300s nudge cadence — a keeper
+/// calling less often needs a smaller effective_N (larger 1-lambda) to
+/// reach the same 30-day span in real time, and vice versa.
+const DEFAULT_EWMA_LAMBDA: u32 = 999_884;
 
 #[contracttype]
 #[derive(Clone)]

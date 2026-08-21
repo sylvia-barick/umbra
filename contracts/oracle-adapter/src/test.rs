@@ -121,15 +121,18 @@ fn get_realized_vol_happy_path() {
     }
 
     // 10 nudges = 1 seed + 9 return observations, clearing MIN_VOL_SAMPLES.
-    // Exact value from the EWMA formula (default lambda 0.99) applied to
-    // this fixed price/timestamp sequence: 9 simple returns, each
-    // squared and divided by the 300s tick interval to get a per-second
-    // variance-rate sample, folded in one at a time
-    // (var_rate = 0.99*var_rate + 0.01*sample), then annualized
-    // (isqrt(var_rate * SECONDS_PER_YEAR)). Deterministic given fixed
-    // inputs — not a value that can drift between runs.
+    // Exact value from the EWMA formula (default lambda 0.999884, ~30-day
+    // effective window at 300s cadence) applied to this fixed
+    // price/timestamp sequence: 9 simple returns, each squared and
+    // divided by the 300s tick interval to get a per-second variance-rate
+    // sample, folded in one at a time (var_rate = lambda*var_rate +
+    // (1-lambda)*sample), then annualized (isqrt(var_rate *
+    // SECONDS_PER_YEAR)). Small relative to oracle-adapter's earlier
+    // lambda=0.99 test value on purpose — 9 observations is a tiny
+    // fraction of an 8640-effective-sample memory, so the estimate is
+    // still mostly its zero-vol seed. Deterministic given fixed inputs.
     let vol = s.oracle.get_realized_vol(&s.asset);
-    assert_eq!(vol, 1_036_988);
+    assert_eq!(vol, 113_153);
 }
 
 #[test]
