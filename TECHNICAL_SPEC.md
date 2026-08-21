@@ -1,0 +1,395 @@
+# Umbra — Technical Specification
+
+*companion to the Umbra PRD & Build Plan*
+
+**Umbra — full contract & interface specification**
+Storage schemas, function signatures, events, pricing math, and test matrices for all five Soroban contracts — precise enough to implement against without re-deriving decisions mid-build.
+
+| | |
+|---|---|
+| **Status** | Draft v1.0 |
+| **Scope** | Phase 1 — testnet MVP |
+| **SDK** | `soroban-sdk`, `sep-40-oracle` 1.4.0 |
+| **Style** | European, cash-settled, full collateral |
+
+---
+
+## 01 Scope
+
+This document specifies the five contracts named in the Umbra PRD's architecture section, at the level of detail needed to implement them without inventing behavior mid-build: storage layout, every public function's signature and error cases, every emitted event, and the pricing formula the AMM actually runs. It assumes the Build Plan's sprint order and doesn't repeat environment setup or the sprint schedule — see that document for how this gets built, this document for exactly what gets built.
+
+**Version discipline.** Struct fields for the `sep-40-oracle` crate's `Asset` enum and `PriceData` struct are specified below to match the crate's documented shape as of v1.4.0. Confirm against the installed crate version before implementing `oracle-adapter` — oracle interfaces are the one dependency in this stack Umbra doesn't control.
+
+---
+
+## 02 System architecture
+
+Two contracts have no dependency on the others and sit as shared services on the left and right rails below. The build/call chain runs top to bottom through the center: a priced series is created, then bought against, then eventually settled — the last contract in that chain is the one every other contract's state ultimately flows through.
+
+```mermaid
+flowchart TB
+    Reflector["Reflector · SEP-40<br/>(external)"] -->|price feed| OA[oracle-adapter]
+    Keeper["Keeper bot<br/>(off-chain service)"] -->|calls settle| SK[settlement-keeper]
+
+    OA -->|TWAP / price reads| AMM[amm-pool]
+    OA -->|price reads| SK
+
+    VA[vault-accounting] <-->|collateral hold / release| AMM
+    VA <-->|collateral hold / release| SK
+
+    AMM -->|series pricing| OF[options-factory]
+    OF -->|expired series lookup| SK
+```
+
+`oracle-adapter` and `vault-accounting` are shared services with no dependency on each other; `amm-pool` → `options-factory` → `settlement-keeper` is the call chain everything else feeds into.
+
+---
+
+## 03 Global conventions
+
+### Types & math
+
+- All price values are `i128`. No floating point anywhere in contract code — Soroban's deterministic execution model doesn't support it, and it wouldn't round consistently across nodes if it did.
+- Every fixed-point value carries an explicit scale documented at its use site (e.g. "7-decimal stroop scale" or "14-decimal Reflector scale") — never assume a global scale constant, since token decimals and oracle decimals differ and must be read from `decimals()` at integration time, not hardcoded.
+- Timestamps are `u64` Unix seconds, from `env.ledger().timestamp()`.
+
+### Storage policy
+
+| Kind | Behavior |
+|---|---|
+| **instance** | Contract-wide config: admin address, linked contract addresses, global parameters. Bundled with the contract instance's own TTL; bump alongside any admin call. |
+| **persistent** | Per-key data that must survive indefinitely: LP balances, option series records, open position state. Explicit TTL extension required on write; expired-and-archived entries must be restored before use — write a helper that bumps TTL on every touch rather than relying on callers to remember. |
+| **temporary** | Short-lived caches only: e.g. a per-block price snapshot reused within one transaction's cross-calls. Cheapest storage, expires quickly, cannot be restored once gone — never put anything here that a later transaction needs to read. |
+
+### Error pattern
+
+Every contract defines its own `#[contracterror]` enum, `#[repr(u32)]`, numbered in blocks of 100 per contract so error codes never collide if a caller inspects a raw code across contracts:
+
+```rust
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum Error {
+    NotInitialized = 1,
+    StalePrice = 2,
+    InsufficientCollateral = 3,
+    // ...
+}
+```
+
+**Access control.** Every state-mutating call that acts on behalf of an address requires `address.require_auth()` before any state changes. Admin-only functions (series-grid approval, emergency pause) check the caller against a stored admin `Address` in instance storage, then also call `require_auth()` on it — never trust an unauthenticated equality check alone.
+
+### Events
+
+Every call that changes settleable state publishes an event: `env.events().publish((topic_symbols...), data_tuple)`. Topics are short `Symbol`s (e.g. `("buy", series_id)`); data is the full struct so off-chain indexers and the keeper bot don't need a second read call to act on the event.
+
+---
+
+## 04 Oracle integration (SEP-40)
+
+Reflector implements the SEP-40 standard price feed interface. `oracle-adapter` wraps `sep-40-oracle`'s `PriceFeedClient` rather than any contract calling Reflector directly, so a future oracle swap touches one contract, not five.
+
+| Method | Signature | Returns |
+|---|---|---|
+| lastprice | `lastprice(asset: &Asset)` | `Option<PriceData>` |
+| price | `price(asset: &Asset, timestamp: &u64)` | `Option<PriceData>` |
+| prices | `prices(asset: &Asset, records: &u32)` | `Option<Vec<PriceData>>` |
+| decimals | `decimals()` | `u32` |
+| resolution | `resolution()` | `u32` (seconds per tick) |
+| assets | `assets()` | `Vec<Asset>` |
+
+```rust
+// expected shape, verify against installed crate
+pub enum Asset {
+    Stellar(Address),
+    Other(Symbol),
+}
+pub struct PriceData {
+    pub price: i128,
+    pub timestamp: u64,
+}
+```
+
+`oracle-adapter` uses `prices(asset, records)` to pull the trailing window needed for realized-volatility calculation in `amm-pool`'s pricing model (Section 07), and `lastprice` for the spot reads used in quoting and settlement.
+
+---
+
+## 05 Contract: `oracle-adapter`
+
+Normalizes the SEP-40 feed into Umbra's internal interface; fails closed on stale or missing prices.
+
+**Depends on:** Reflector (external) · **Depended on by:** `amm-pool`, `settlement-keeper`
+
+### Storage
+
+| Key | Type | Kind | Description |
+|---|---|---|---|
+| Admin | `Address` | instance | Can update `max_staleness` and the Reflector contract address. |
+| ReflectorAddr | `Address` | instance | Deployed Reflector price-feed contract on the active network. |
+| MaxStaleness | `u64` | instance | Max age in seconds before a price is rejected. Suggested default: 300. |
+
+### Interface
+
+| Function | Params | Returns | Errors |
+|---|---|---|---|
+| initialize | `admin: Address, reflector: Address, max_staleness: u64` | `()` | AlreadyInitialized |
+| get_price | `asset: Asset` | `(i128, u64)` | StalePrice, PriceUnavailable |
+| get_twap | `asset: Asset, window_secs: u64` | `i128` | InsufficientHistory |
+| get_realized_vol | `asset: Asset, window_secs: u64` | `u32` (annualized, 1e-6 scale) | InsufficientHistory |
+| set_max_staleness | `admin: Address, secs: u64` | `()` | NotAuthorized |
+
+### Events
+
+| Event | Topics | Data |
+|---|---|---|
+| stale_rejected | `("price","stale")` | `(asset, age_secs)` |
+
+### Invariants
+
+- `get_price` never returns a price older than `MaxStaleness` — it errors instead of returning stale data.
+- `get_realized_vol` requires at least a minimum number of price samples (suggested: 8) in the window or it errors rather than computing volatility from a thin sample.
+
+---
+
+## 06 Contract: `vault-accounting`
+
+LP deposits, share accounting, and collateral custody backing open option positions.
+
+**Depends on:** USDC token contract (SEP-41) · **Depended on by:** `amm-pool`, `settlement-keeper`
+
+### Storage
+
+| Key | Type | Kind | Description |
+|---|---|---|---|
+| Admin | `Address` | instance | Set once at init; can register the `amm-pool` and `settlement-keeper` as authorized callers. |
+| TokenAddr | `Address` | instance | Collateral asset — USDC via SEP-41 token client. |
+| AuthorizedCallers | `Vec<Address>` | instance | Only `amm-pool` and `settlement-keeper` may move locked collateral. |
+| Shares(Address) | `i128` | persistent | LP share balance per depositor. |
+| TotalShares | `i128` | instance | Sum of all outstanding shares — denominator for share-price calculation. |
+| FreeCollateral | `i128` | instance | Idle collateral available for new option writes. |
+| LockedCollateral | `i128` | instance | Collateral currently backing open positions — excluded from share-price's "free" figure but still owned by LPs. |
+
+### Interface
+
+| Function | Params | Returns | Error |
+|---|---|---|---|
+| deposit | `from: Address, amount: i128` | `i128` (shares minted) | ZeroAmount |
+| withdraw | `from: Address, shares: i128` | `i128` (amount paid) | InsufficientFreeCollateral, InsufficientShares |
+| lock_collateral | `caller: Address, amount: i128` | `()` | NotAuthorized, InsufficientFreeCollateral |
+| release_collateral | `caller: Address, amount: i128, payout: i128` | `()` | NotAuthorized |
+| share_price | — | `i128` | — |
+
+### Events
+
+| Event | Topics | Data |
+|---|---|---|
+| deposited | `("vault","deposit")` | `(from, amount, shares)` |
+| withdrawal | `("vault","withdraw")` | `(from, shares, amount)` |
+| withdrawal_queued | `("vault","queued")` | `(from, shares_requested, shortfall)` |
+
+### Invariants
+
+- `FreeCollateral + LockedCollateral` always equals the token contract's actual balance held by this contract — any drift is a critical bug, and the integration test suite asserts this equality after every state-changing call.
+- `withdraw` can only pull from `FreeCollateral`; a withdrawal request exceeding it queues rather than partially executing against locked funds.
+- `share_price` accounts for unrealized premium owed on open positions, not just idle balance — see Section 13 for why this is the highest-risk calculation in the contract.
+
+---
+
+## 07 Contract: `amm-pool`
+
+Prices premiums and executes buys/sells against `vault-accounting`'s pooled collateral.
+
+**Depends on:** `oracle-adapter`, `vault-accounting` · **Depended on by:** `options-factory`
+
+### Pricing model
+
+European-style, cash-settled premium via the standard Black-Scholes formula, deliberately simplified for v1:
+
+```
+C = S·N(d1) − K·N(d2)          (call, r = 0 for v1 — no yield-curve integration yet)
+P = K·N(−d2) − S·N(−d1)        (put)
+
+d1 = [ln(S/K) + (σ²/2)·T] / (σ·√T)
+d2 = d1 − σ·√T
+
+S  = spot, from oracle-adapter.get_price
+σ  = realized volatility, from oracle-adapter.get_realized_vol (30d window)
+T  = (expiry − now) / seconds_per_year
+K  = strike, fixed at series creation
+```
+
+**On-chain N(x) approximation.** Soroban has no floating point. N(x) (the standard normal CDF) is computed via a fixed-point rational approximation (Abramowitz–Stegun 26.2.17 or equivalent), or — given v1's fixed weekly/monthly expiry grid bounds the range of realistic moneyness — a precomputed lookup table indexed by discretized d1/d2 buckets, linearly interpolated. The lookup table is the cheaper option in compute units and is the recommended default; the rational approximation is the fallback if bucket resolution proves too coarse in testing.
+
+### Storage
+
+| Key | Type | Kind | Description |
+|---|---|---|---|
+| OracleAddr | `Address` | instance | `oracle-adapter` contract. |
+| VaultAddr | `Address` | instance | `vault-accounting` contract. |
+| FeeBps | `u32` | instance | Protocol fee on premiums, basis points. |
+| Position(holder, series_id) | struct | persistent | Keyed by holder address + series_id: side, size, premium paid. |
+| OpenInterest(series_id) | `i128` | persistent | Total notional open per series_id — read by `vault-accounting`'s risk checks indirectly via lock amounts. |
+
+### Interface
+
+| Function | Params | Returns | Errors |
+|---|---|---|---|
+| quote | `series_id: u64, side: Side` | `i128` (premium) | SeriesNotFound, SeriesExpired |
+| buy | `buyer: Address, series_id: u64, side: Side, size: i128, max_premium: i128` | `i128` (premium paid) | SlippageExceeded, InsufficientFreeCollateral |
+| sell | `seller: Address, series_id: u64, side: Side, size: i128, min_premium: i128` | `i128` | SlippageExceeded, NoOpenPosition |
+
+### Events
+
+| Event | Topics | Data |
+|---|---|---|
+| bought | `("amm","buy",series_id)` | `(buyer, side, size, premium)` |
+| sold | `("amm","sell",series_id)` | `(seller, side, size, premium)` |
+
+### Invariants
+
+- `buy` calls `vault-accounting.lock_collateral` for the full notional before releasing the position — no undercollateralized state is ever reachable in v1.
+- The quote and the buy that follows it can diverge if the oracle price moves between calls; `max_premium`/`min_premium` slippage bounds are mandatory parameters, not optional.
+
+---
+
+## 08 Contract: `options-factory`
+
+Creates and registers option series on a fixed strike/expiry grid; the catalog `amm-pool` prices against.
+
+**Depends on:** `amm-pool` (validates underlying is supported) · **Depended on by:** `settlement-keeper`, demo frontend
+
+### Storage
+
+| Key | Type | Kind | Description |
+|---|---|---|---|
+| Admin | `Address` | instance | Approves new underlyings and expiry-grid changes. |
+| Series(series_id) | `SeriesInfo` | persistent | strike, expiry, created_at, underlying. |
+| SeriesByUnderlying(Asset) | `Vec<u64>` | persistent | Index for `list_series`. |
+| ApprovedExpiries | `Vec<u64>` | instance | Allowed expiry timestamps — the fixed weekly/monthly grid from the PRD's MVP scope. |
+
+### Interface
+
+| Function | Params | Returns | Errors |
+|---|---|---|---|
+| create_series | `underlying: Asset, strike: i128, expiry: u64` | `u64` (series_id) | ExpiryNotApproved, UnderlyingNotSupported, DuplicateSeries |
+| list_series | `underlying: Asset` | `Vec<SeriesInfo>` | — |
+| get_series | `series_id: u64` | `SeriesInfo` | SeriesNotFound |
+| approve_expiry | `admin: Address, expiry: u64` | `()` | NotAuthorized |
+
+### Events
+
+| Event | Topics | Data |
+|---|---|---|
+| series_created | `("factory","created")` | `(series_id, underlying, strike, expiry)` |
+
+### Invariants
+
+- `create_series` succeeds for any caller as long as the expiry is on the approved grid, regardless of who calls — creation is permissionless once the grid slot exists, only the grid itself is admin-gated. This keeps market creation open without letting anyone invent off-grid expiries the risk model wasn't sized for.
+
+---
+
+## 09 Contract: `settlement-keeper`
+
+Handles exercise/expiry settlement — the contract the off-chain keeper bot calls, and where every other contract's state resolves.
+
+**Depends on:** `oracle-adapter`, `vault-accounting`, `options-factory`, `amm-pool` · **Depended on by:** keeper bot (off-chain)
+
+### Storage
+
+| Key | Type | Kind | Description |
+|---|---|---|---|
+| Settled(series_id) | `bool` | persistent | Prevents double-settlement of a series_id. |
+| KeeperRewardBps | `u32` | instance | Share of settled premium paid to whoever calls `settle`. |
+
+### Interface
+
+| Function | Params | Returns | Errors |
+|---|---|---|---|
+| settle | `caller: Address, series_id: u64` | `()` | NotYetExpired, AlreadySettled, SeriesNotFound |
+| is_settleable | `series_id: u64` | `bool` | — |
+
+### Events
+
+| Event | Topics | Data |
+|---|---|---|
+| settled | `("keeper","settled",series_id)` | `(final_price, total_payout, keeper_reward, caller)` |
+
+### Invariants
+
+- `settle` is idempotent-safe: a second call on an already-settled series errors rather than double-paying, even if two keeper bots race each other.
+- Settlement price is read via `oracle-adapter.get_price` at call time, not cached from series creation — this is the one place a stale-price rejection genuinely blocks user funds from resolving, so `MaxStaleness` in `oracle-adapter` needs to be tuned loosely enough that a temporary feed gap doesn't strand settlement indefinitely.
+
+---
+
+## 10 Call sequences
+
+### Create series → quote → buy
+
+1. Admin (or any caller, per the permissionless-creation invariant) calls `options-factory.create_series(underlying, strike, expiry)` → returns `series_id`, emits `series_created`.
+2. Buyer calls `amm-pool.quote(series_id, side)` → internally calls `oracle-adapter.get_price` and `get_realized_vol`, runs the Black-Scholes calculation, returns a premium.
+3. Buyer calls `amm-pool.buy(buyer, series_id, side, size, max_premium)`.
+4. `amm-pool` calls `vault-accounting.lock_collateral(caller=amm-pool, amount=notional)` — errors here abort the whole transaction, so no partial state is possible.
+5. `amm-pool` transfers premium from buyer to `vault-accounting`'s free collateral, records the `Position`, emits `bought`.
+
+### Settlement
+
+1. Keeper bot polls `settlement-keeper.is_settleable(series_id)` for each series past its expiry timestamp.
+2. Keeper bot calls `settlement-keeper.settle(caller=keeper_address, series_id)`.
+3. `settlement-keeper` calls `oracle-adapter.get_price` for the final settlement price.
+4. For each open position (from `amm-pool`'s position records), calls `vault-accounting.release_collateral` to pay ITM holders and return unused collateral to the LP pool.
+5. Pays the keeper reward from the settled premium pool, marks `Settled(series_id) = true`, emits `settled`.
+
+---
+
+## 11 Test matrix
+
+Minimum case coverage per contract before a sprint is considered done — not exhaustive, but the floor.
+
+| Contract | Case | Asserts |
+|---|---|---|
+| oracle-adapter | Price older than MaxStaleness | StalePrice error, no fallback value returned. |
+| oracle-adapter | Realized vol with < minimum samples | InsufficientHistory error. |
+| vault-accounting | Deposit, withdraw same block | Share price unchanged; no phantom yield from round-tripping. |
+| vault-accounting | Withdraw exceeding free collateral | Queues rather than partially executing against locked funds. |
+| vault-accounting | Dust-amount deposit (1 stroop) | No rounding-to-zero share mint; either mints correctly or rejects explicitly. |
+| amm-pool | Quote with volatility ≈ 0 | Premium approaches intrinsic value, no division-by-zero in d1/d2. |
+| amm-pool | Buy with stale oracle price | Reverts via oracle-adapter's error, no trade executes at a stale price. |
+| amm-pool | Buy at max i128 notional | No silent overflow — checked arithmetic throughout premium and lock calculations. |
+| options-factory | Create series on non-approved expiry | ExpiryNotApproved error. |
+| settlement-keeper | Double settle same series | Second call errors, first call's payout is untouched. |
+| settlement-keeper | Settle before expiry | NotYetExpired error. |
+| integration | Full create → quote → buy → advance-time → settle | Buyer balance, LP share price, and keeper reward all match hand-calculated expected values. |
+
+---
+
+## 12 Initialization order
+
+Constructors need each other's addresses, so deployment is strictly ordered — deploying out of order means redeploying, since Soroban contract addresses aren't known until after deployment.
+
+1. Deploy `oracle-adapter`. Initialize with admin address and the network's Reflector contract address.
+2. Deploy `vault-accounting`. Initialize with admin address and the USDC token contract address.
+3. Deploy `amm-pool`. Initialize with `oracle-adapter`'s and `vault-accounting`'s addresses.
+4. Call `vault-accounting`'s `AuthorizedCallers` admin function to register `amm-pool`'s address (it needs to call `lock_collateral`).
+5. Deploy `options-factory`. Initialize with `amm-pool`'s address and the initial approved-expiry grid.
+6. Deploy `settlement-keeper`. Initialize with all four preceding addresses.
+7. Register `settlement-keeper` as an additional authorized caller on `vault-accounting` (it needs `release_collateral`).
+
+---
+
+## 13 Security invariants
+
+- Nothing other than `vault-accounting` ever holds collateral directly — `amm-pool` and `settlement-keeper` only ever call `lock_collateral`/`release_collateral`, keeping custody in exactly one audited place.
+- Every arithmetic operation on collateral or premium amounts uses checked (not wrapping) `i128` operations — an overflow must revert the transaction, never wrap silently.
+- Share price in `vault-accounting` is the single most consequential calculation in the system: it must reflect locked collateral's mark-to-market exposure, not just free balance, or LPs can be diluted or over-credited around large open positions. This gets its own dedicated test file, not just inline coverage in the general suite.
+- Assume `oracle-adapter` fails closed. Nothing downstream should ever treat a missing price as zero, none, or "use the last known value" without that being an explicit, separately-reviewed decision.
+- Admin keys (one per contract at MVP) are a known centralization point for a testnet-stage protocol — the PRD's Phase 2 audit should scope whether these move to a multisig or timelock before mainnet, not leave it implicit.
+
+---
+
+## 14 Sources
+
+- `sep-40-oracle` — `PriceFeedClient` (docs.rs)
+- Stellar Docs — Oracle Providers
+- Stellar Docs — Smart Contracts Overview & Rust SDK
+- `soroban-sdk` (docs.rs)
+- `reflector-network/reflector-contract` (GitHub)
