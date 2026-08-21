@@ -110,6 +110,105 @@ fn setup() -> Setup {
 }
 
 #[test]
+fn settle_pays_correct_amount_with_mismatched_oracle_and_token_decimals() {
+    // The buy-path scale-conflation bug (notional/premium computed in the
+    // oracle's price scale, then passed directly as a token amount) has
+    // a mirror-image risk here: settle()'s payout does the same kind of
+    // price-to-collateral conversion (strike/intrinsic, in the oracle's
+    // scale, times position size, rescaled into the collateral token's
+    // scale) on the way OUT. Reproduces the exact live-testnet mismatch
+    // (Reflector's 14-decimal feed vs. native XLM's 7-decimal SAC) all
+    // the way through a real settlement, and asserts the ITM payout
+    // lands at a plausible few-hundredths-of-a-token amount — not the
+    // ~10,000,000x-inflated (or, the other direction, truncated-to-zero)
+    // value a missed rescale would produce.
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(9_000_000);
+
+    let admin = Address::generate(&env);
+    let sym = Symbol::new(&env, "XLM");
+    let asset = Asset::Other(sym.clone());
+    let mock_asset = MockAsset::Other(sym);
+
+    let mock_id = env.register_contract_wasm(None, MockPriceOracleWASM);
+    let mock = MockPriceOracleClient::new(&env, &mock_id);
+    // 14-decimal oracle, matching Reflector's real CEX/DEX feed.
+    mock.set_data(&admin, &mock_asset, &vec![&env, mock_asset.clone()], &14, &RESOLUTION);
+
+    let oracle_id = env.register(OracleAdapter, ());
+    let oracle = OracleAdapterClient::new(&env, &oracle_id);
+    oracle.initialize(&admin, &mock_id, &MAX_STALENESS);
+
+    // ~$0.19 XLM spot at 14-decimal scale; nudge a flat 9-tick history
+    // into the EWMA estimator so realized-vol reads succeed.
+    let start = env.ledger().timestamp();
+    for i in 0..9u64 {
+        let ts = start + i * RESOLUTION as u64;
+        env.ledger().set_timestamp(ts);
+        mock.set_price(&vec![&env, 19_000_000_000_000i128], &ts);
+        oracle.nudge_volatility(&asset);
+    }
+    let now = env.ledger().timestamp();
+
+    // 7-decimal collateral token (native-XLM-like), deliberately
+    // different from the oracle's 14 decimals.
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_addr = sac.address();
+    let token = TokenClient::new(&env, &token_addr);
+    let sac_client = StellarAssetClient::new(&env, &token_addr);
+
+    let vault_id = env.register(VaultAccounting, ());
+    let vault = VaultAccountingClient::new(&env, &vault_id);
+    vault.initialize(&admin, &token_addr);
+
+    let lp = Address::generate(&env);
+    sac_client.mint(&lp, &1_000_0000000i128); // 1000 tokens at 7-decimal scale
+    vault.deposit(&lp, &1_000_0000000i128);
+
+    let amm_id = env.register(AmmPool, ());
+    let amm = AmmPoolClient::new(&env, &amm_id);
+    amm.initialize(&admin, &oracle_id, &vault_id, &token_addr, &50u32, &vec![&env, asset.clone()]);
+    vault.add_authorized_caller(&admin, &amm_id);
+
+    let expiry = now + 1_800;
+    let factory_id = env.register(OptionsFactory, ());
+    let factory = OptionsFactoryClient::new(&env, &factory_id);
+    factory.initialize(&admin, &amm_id, &vec![&env, expiry]);
+    amm.set_factory(&admin, &factory_id);
+
+    let keeper_id = env.register(SettlementKeeper, ());
+    let keeper = SettlementKeeperClient::new(&env, &keeper_id);
+    keeper.initialize(&oracle_id, &vault_id, &factory_id, &amm_id, &token_addr, &KEEPER_REWARD_BPS);
+    amm.set_settlement(&admin, &keeper_id);
+    vault.add_authorized_caller(&admin, &keeper_id);
+
+    // $0.18 strike at 14-decimal scale.
+    let strike = 18_000_000_000_000i128;
+    let series_id = factory.create_series(&asset, &strike, &expiry);
+
+    let buyer = Address::generate(&env);
+    sac_client.mint(&buyer, &10_0000000i128); // 10 tokens
+    let size = 100_000_000_000_000i128; // 1 whole contract at the 14-decimal price_scale
+    amm.buy(&buyer, &series_id, &Side::Call, &size, &10_0000000i128);
+    let buyer_balance_after_buy = token.balance(&buyer);
+
+    // Settle deep-ish ITM: spot rises to $0.22, intrinsic = 0.04.
+    env.ledger().set_timestamp(expiry + 1);
+    mock.set_price(&vec![&env, 22_000_000_000_000i128], &(expiry + 1));
+
+    let bot = Address::generate(&env);
+    keeper.settle(&bot, &series_id);
+
+    // Expected payout: intrinsic(0.04) * size(1 contract), rescaled from
+    // the 14-decimal price scale into the 7-decimal token scale ==
+    // 400_000 raw (0.04 tokens) — not ~4e12 (unrescaled) or 0 (scale
+    // collapsed the wrong direction).
+    let payout = token.balance(&buyer) - buyer_balance_after_buy;
+    assert_eq!(payout, 400_000i128);
+}
+
+#[test]
 fn settle_before_expiry_errors() {
     let s = setup();
     let series_id = s.factory.create_series(&s.asset, &90_0000000i128, &s.weekly_expiry);

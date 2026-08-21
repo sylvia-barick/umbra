@@ -11,10 +11,6 @@ use soroban_sdk::{contract, contracterror, contractimpl, contracttype, symbol_sh
 const LEDGER_THRESHOLD: u32 = 17_280;
 const LEDGER_BUMP_TO: u32 = 535_680;
 
-/// Share price is reported at a fixed 7-decimal (stroop) scale, matching
-/// the collateral token's native decimals. 1.0 == 10_000_000.
-const SHARE_PRICE_SCALE: i128 = 10_000_000;
-
 #[contracttype]
 #[derive(Clone)]
 enum DataKey {
@@ -25,6 +21,16 @@ enum DataKey {
     TotalShares,
     FreeCollateral,
     LockedCollateral,
+    /// 10^decimals for the collateral token, read once at initialize()
+    /// via the token's own decimals() and used only as share_price()'s
+    /// reporting scale ("1.0" == this value) — never hardcoded, since a
+    /// share_price reader (a dashboard, an integrator) needs it to match
+    /// the actual token, not an assumed 7-decimal default. Deposit/
+    /// withdraw never touch this: they mint/redeem shares via a direct
+    /// amount/TotalShares ratio in the token's native units throughout,
+    /// so this scale choice affects only how share_price's *return
+    /// value* reads, never fund-moving correctness.
+    TokenScale,
 }
 
 #[contracterror]
@@ -64,8 +70,12 @@ impl VaultAccounting {
             return Err(Error::AlreadyInitialized);
         }
         admin.require_auth();
+        let token_decimals = token::Client::new(&env, &token).decimals();
+        let token_scale = 10i128.checked_pow(token_decimals).expect("token scale overflow");
+
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::TokenAddr, &token);
+        env.storage().instance().set(&DataKey::TokenScale, &token_scale);
         env.storage()
             .instance()
             .set(&DataKey::AuthorizedCallers, &Vec::<Address>::new(&env));
@@ -280,16 +290,19 @@ impl VaultAccounting {
         Ok(())
     }
 
-    /// (Free + Locked) / TotalShares at 7-decimal scale — reflects locked
-    /// collateral's exposure, not just idle balance, since LPs still own
-    /// the collateral backing open positions.
+    /// (Free + Locked) / TotalShares, reported at the collateral token's
+    /// own scale (from decimals(), read at initialize() — never
+    /// hardcoded) — reflects locked collateral's exposure, not just idle
+    /// balance, since LPs still own the collateral backing open
+    /// positions.
     pub fn share_price(env: Env) -> i128 {
+        let token_scale: i128 = env.storage().instance().get(&DataKey::TokenScale).unwrap();
         let total_shares: i128 = env.storage().instance().get(&DataKey::TotalShares).unwrap_or(0);
         if total_shares == 0 {
-            return SHARE_PRICE_SCALE;
+            return token_scale;
         }
         let total = Self::total_collateral(&env);
-        total.checked_mul(SHARE_PRICE_SCALE).expect("share price mul overflow") / total_shares
+        total.checked_mul(token_scale).expect("share price mul overflow") / total_shares
     }
 
     fn total_collateral(env: &Env) -> i128 {

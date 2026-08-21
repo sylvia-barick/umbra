@@ -200,6 +200,7 @@ LP deposits, share accounting, and collateral custody backing open option positi
 | TotalShares | `i128` | instance | Sum of all outstanding shares — denominator for share-price calculation. |
 | FreeCollateral | `i128` | instance | Idle collateral available for new option writes. |
 | LockedCollateral | `i128` | instance | Collateral currently backing open positions — excluded from share-price's "free" figure but still owned by LPs. |
+| TokenScale | `i128` | instance | `10^decimals` for the collateral token, read once at `initialize()` — `share_price`'s reporting scale only; every other function moves raw already-token-scale amounts and never touches this. |
 
 ### Interface
 
@@ -227,6 +228,7 @@ LP deposits, share accounting, and collateral custody backing open option positi
 - `FreeCollateral + LockedCollateral` always equals the token contract's actual balance held by this contract — any drift is a critical bug, and the integration test suite asserts this equality after every state-changing call.
 - `withdraw` can only pull from `FreeCollateral`; a withdrawal request exceeding it queues rather than partially executing against locked funds.
 - `share_price` accounts for unrealized premium owed on open positions, not just idle balance — see Section 13 for why this is the highest-risk calculation in the contract.
+- `vault-accounting` never touches the oracle's price scale — deposit/withdraw/lock/credit/release/pay_from_free all move raw, already-token-scale amounts supplied by the caller, with no conversion happening inside this contract at all. The one place a scale choice was ever made here was `share_price`'s *reporting* scale, previously hardcoded to 7 decimals regardless of the actual token — cosmetic (deposit/withdraw never read it, so no fund-safety impact) but silently wrong for any non-7-decimal token, the same hardcoding mistake that broke `amm-pool.buy()` against a 14-decimal oracle. Fixed to read the collateral token's own `decimals()` at `initialize()`, same discipline as everywhere else in this stack, and regression-tested (`share_price_scale_matches_token_decimals_not_a_hardcoded_default`) against a 3-decimal mock token — `register_stellar_asset_contract_v2` can only ever produce Stellar's fixed 7-decimal SAC, so a genuine mismatch needs a purpose-built stub.
 
 ---
 
@@ -352,6 +354,8 @@ Handles exercise/expiry settlement — the contract the off-chain keeper bot cal
 | Key | Type | Kind | Description |
 |---|---|---|---|
 | OracleAddr, VaultAddr, FactoryAddr, AmmPoolAddr, TokenAddr | `Address` | instance | The four dependency addresses plus the collateral token, all set at init. |
+| PriceScale | `i128` | instance | `10^decimals` for the oracle's price feed — must match `amm-pool`'s own `PriceScale`, since both price the same strike/spot values. Read once at `initialize()` via `oracle-adapter.decimals()`. |
+| TokenScale | `i128` | instance | `10^decimals` for the collateral token — must match `amm-pool`'s own `TokenScale`. Notional/payout values computed in `PriceScale` are rescaled into this immediately before any fund movement — see the invariant below. |
 | Settled(series_id) | `bool` | persistent | Prevents double-settlement of a series_id. |
 | KeeperRewardBps | `u32` | instance | Share of settled ITM payout paid to whoever calls `settle`. |
 
@@ -372,6 +376,7 @@ Handles exercise/expiry settlement — the contract the off-chain keeper bot cal
 
 - `settle` is idempotent-safe: a second call on an already-settled series errors rather than double-paying, even if two keeper bots race each other.
 - Settlement price is read via `oracle-adapter.get_price` at call time, not cached from series creation — this is the one place a stale-price rejection genuinely blocks user funds from resolving, so `MaxStaleness` in `oracle-adapter` needs to be tuned loosely enough that a temporary feed gap doesn't strand settlement indefinitely.
+- `settle`'s payout math does the same kind of price-to-collateral conversion as `amm-pool.buy()`'s notional calculation — `strike`/`intrinsic` values live in `PriceScale`, but the amounts released through `vault-accounting` and transferred to holders must be in `TokenScale`. Both `notional` and `raw_payout` (and therefore the capped `payout`) are rescaled from `PriceScale` to `TokenScale` before touching `vault.release_collateral` or the token transfer — regression-tested (`settle_pays_correct_amount_with_mismatched_oracle_and_token_decimals`) against the same 14-decimal-oracle/7-decimal-token mismatch that broke `buy()`, asserting the exact expected payout rather than a loose bound. `keeper_reward` itself never needs rescaling: it's a bps cut of `total_payout`, which is already `TokenScale` by the time it's summed.
 
 ---
 
@@ -416,12 +421,15 @@ Minimum case coverage per contract before a sprint is considered done — not ex
 | vault-accounting | Deposit, withdraw same block | Share price unchanged; no phantom yield from round-tripping. |
 | vault-accounting | Withdraw exceeding free collateral | Queues rather than partially executing against locked funds. |
 | vault-accounting | Dust-amount deposit (1 stroop) | No rounding-to-zero share mint; either mints correctly or rejects explicitly. |
+| vault-accounting | share_price against a non-7-decimal collateral token | Reports "1.0" at the token's own scale, not a hardcoded 7-decimal default. |
 | amm-pool | Quote with volatility ≈ 0 | Premium approaches intrinsic value, no division-by-zero in d1/d2. |
 | amm-pool | Buy with stale oracle price | Reverts via oracle-adapter's error, no trade executes at a stale price. |
 | amm-pool | Buy at max i128 notional | No silent overflow — checked arithmetic throughout premium and lock calculations. |
+| amm-pool | Buy with mismatched oracle/token decimals (14 vs. 7) | Notional and premium land at the correct, exact token-scale value — not the oracle-scale value passed through unrescaled. |
 | options-factory | Create series on non-approved expiry | ExpiryNotApproved error. |
 | settlement-keeper | Double settle same series | Second call errors, first call's payout is untouched. |
 | settlement-keeper | Settle before expiry | NotYetExpired error. |
+| settlement-keeper | Settle with mismatched oracle/token decimals (14 vs. 7) | ITM payout lands at the correct, exact token-scale value — not the oracle-scale value passed through unrescaled. |
 | integration | Full create → quote → buy → advance-time → settle | Buyer balance, LP share price, and keeper reward all match hand-calculated expected values. |
 
 ---
@@ -447,6 +455,14 @@ Constructors need each other's addresses, so deployment is strictly ordered — 
 - Share price in `vault-accounting` is the single most consequential calculation in the system: it must reflect locked collateral's mark-to-market exposure, not just free balance, or LPs can be diluted or over-credited around large open positions. This gets its own dedicated test file, not just inline coverage in the general suite.
 - Assume `oracle-adapter` fails closed. Nothing downstream should ever treat a missing price as zero, none, or "use the last known value" without that being an explicit, separately-reviewed decision.
 - Admin keys (one per contract at MVP) are a known centralization point for a testnet-stage protocol — the PRD's Phase 2 audit should scope whether these move to a multisig or timelock before mainnet, not leave it implicit.
+- **Scale conflation (oracle `PriceScale` vs. collateral `TokenScale`) is a bug class, not a one-off — audited across the whole stack after the first instance broke `amm-pool.buy()` on testnet.** Every place a value crosses from the oracle's price scale into an actual token amount:
+  - `amm-pool.quote`/`buy`/`sell` — premium and notional, rescaled before touching `vault-accounting` or a token transfer. Regression-tested with mismatched (14 vs. 7) decimals.
+  - `settlement-keeper.settle` — notional and payout, same rescale, same reasoning, since it computes the mirror-image (paying collateral back out) of what `buy()` computes going in. Regression-tested the same way.
+  - `oracle-adapter` — audited and confirmed clean: it never touches `TokenScale` at all. Every value it returns (`get_price`, `get_twap`, `get_realized_vol`) stays in the oracle's own price scale or the dimensionless annualized-vol ratio; it has no concept of a collateral token and shouldn't.
+  - `options-factory` — audited and confirmed clean: `strike` passes through as an opaque `i128`, stored and forwarded via `register_series` but never combined with a token amount or rescaled anywhere in this contract.
+  - `vault-accounting` — audited and confirmed clean for fund movement: every function that actually moves collateral (`deposit`, `withdraw`, `lock_collateral`, `credit_collateral`, `release_collateral`, `pay_from_free`) works purely in raw, caller-supplied token-scale amounts, with no scale conversion inside this contract at all. The one place a scale value ever mattered here was `share_price`'s *reporting* scale, previously hardcoded to 7 decimals — cosmetic, not a fund-safety bug (nothing fund-moving reads it), but the same category of mistake. Fixed and regression-tested against a 3-decimal mock token.
+
+  Rule going forward: any new function that combines a value read from `oracle-adapter` with a value that will be locked, transferred, or compared against a token amount must rescale from `PriceScale` to `TokenScale` explicitly, at the point of crossing, and that crossing needs a test using genuinely different oracle/token decimal counts — a same-scale mock (the default in most of this suite's test setups) cannot catch this class of bug by construction.
 
 ---
 

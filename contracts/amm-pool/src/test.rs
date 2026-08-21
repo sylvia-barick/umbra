@@ -224,9 +224,12 @@ fn buy_with_mismatched_oracle_and_token_decimals_computes_correct_notional() {
 
     // notional ~= strike(0.18) * size(1 contract) rescaled into the
     // 7-decimal token: a few tenths of a token, not 1.8 million.
-    let size = 1_00_000_000_000_00i128; // 1 whole contract at the 14-decimal price_scale
+    let size = 100_000_000_000_000i128; // 1 whole contract at the 14-decimal price_scale
     let premium = amm.buy(&buyer, &series_id, &Side::Call, &size, &10_0000000i128);
-    assert!(premium > 0 && premium < 1_0000000i128, "premium should be a fraction of one token, got {premium}");
+    // Flat price history -> vol ~0 -> premium ~= intrinsic: spot(0.19) -
+    // strike(0.18) = 0.01, rescaled from the 14-decimal price scale into
+    // the 7-decimal token scale = 100_000 raw.
+    assert_eq!(premium, 100_000i128);
 }
 
 #[test]

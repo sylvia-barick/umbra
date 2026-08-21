@@ -1,9 +1,26 @@
 use crate::{Error, VaultAccounting, VaultAccountingClient};
 use soroban_sdk::{
+    contract, contractimpl,
     testutils::Address as _,
     token::{StellarAssetClient, TokenClient},
     Address, Env,
 };
+
+/// Minimal test-only token stub exposing only decimals() — vault-accounting's
+/// initialize() and a zero-deposit share_price() call never invoke any other
+/// token method, and Soroban dispatches by function name, so a contract
+/// implementing just this one function satisfies token::Client::decimals().
+/// Lets the mismatched-token-decimals test below use a scale (3) that
+/// register_stellar_asset_contract_v2's always-7-decimal SAC can't provide.
+#[contract]
+struct MockDecimalsToken;
+
+#[contractimpl]
+impl MockDecimalsToken {
+    pub fn decimals(_env: Env) -> u32 {
+        3
+    }
+}
 
 struct Setup {
     env: Env,
@@ -105,6 +122,30 @@ fn lock_and_release_collateral_preserves_free_plus_locked_invariant() {
     assert_eq!(contract_balance, 850_0000000i128);
     assert_eq!(s.token.balance(&amm), 150_0000000i128);
     let _ = holder;
+}
+
+#[test]
+fn share_price_scale_matches_token_decimals_not_a_hardcoded_default() {
+    // share_price() used to report at a hardcoded 7-decimal scale
+    // regardless of the actual collateral token — cosmetic (deposit/
+    // withdraw never read it, so no fund-safety impact) but silently
+    // wrong for any non-7-decimal token, exactly the scale-hardcoding
+    // bug class that broke amm-pool's buy() against a 14-decimal oracle.
+    // Uses a 3-decimal mock token specifically because
+    // register_stellar_asset_contract_v2 can only ever produce 7.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let token_id = env.register(MockDecimalsToken, ());
+
+    let vault_id = env.register(VaultAccounting, ());
+    let vault = VaultAccountingClient::new(&env, &vault_id);
+    vault.initialize(&admin, &token_id);
+
+    // No deposits yet: share_price() must report "1.0" at the token's
+    // own 3-decimal scale (1_000), not a hardcoded 7-decimal 10_000_000.
+    assert_eq!(vault.share_price(), 1_000i128);
 }
 
 #[test]
