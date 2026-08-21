@@ -11,7 +11,7 @@
 
 mod math;
 
-use math::{fp_div, fp_ln, fp_mul, fp_sqrt, normal_cdf, MATH_SCALE};
+use math::{fp_div, fp_ln, fp_mul, fp_sqrt, from_math_scale, normal_cdf, to_math_scale, MATH_SCALE};
 use oracle_adapter::OracleAdapterClient;
 use sep_40_oracle::Asset;
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Vec};
@@ -19,12 +19,6 @@ use vault_accounting::VaultAccountingClient;
 
 const LEDGER_THRESHOLD: u32 = 17_280;
 const LEDGER_BUMP_TO: u32 = 535_680;
-
-/// Spot/strike/premium scale: 7-decimal, matching stroops. MVP
-/// simplification — see the technical spec's "Types & math" section on
-/// scale discipline; a production build would read decimals() per asset.
-const PRICE_SCALE: i128 = 10_000_000;
-const MATH_TO_PRICE: i128 = MATH_SCALE / PRICE_SCALE;
 
 const SECONDS_PER_YEAR: i128 = 31_536_000;
 /// Trailing window used for realized-volatility lookups, per spec (30d).
@@ -62,6 +56,12 @@ enum DataKey {
     FactoryAddr,
     SettlementAddr,
     FeeBps,
+    /// 10^decimals for the oracle's price feed, read once at initialize()
+    /// via oracle-adapter.decimals() and cached — spot/strike/size/premium
+    /// all share this scale. Never hardcode it: Reflector's feeds differ
+    /// (e.g. 14 decimals on the CEX/DEX feed), and it must be read at
+    /// integration time per the technical spec's scale-discipline note.
+    PriceScale,
     SupportedUnderlyings,
     SeriesMeta(u64),
     Position(Address, u64, Side),
@@ -117,11 +117,15 @@ impl AmmPool {
             return Err(Error::AlreadyInitialized);
         }
         admin.require_auth();
+        let decimals = OracleAdapterClient::new(&env, &oracle).decimals();
+        let price_scale = 10i128.checked_pow(decimals).expect("price scale overflow");
+
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::OracleAddr, &oracle);
         env.storage().instance().set(&DataKey::VaultAddr, &vault);
         env.storage().instance().set(&DataKey::TokenAddr, &token);
         env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
+        env.storage().instance().set(&DataKey::PriceScale, &price_scale);
         env.storage()
             .instance()
             .set(&DataKey::SupportedUnderlyings, &underlyings);
@@ -253,7 +257,8 @@ impl AmmPool {
         if now >= info.expiry {
             return Err(Error::SeriesExpired);
         }
-        Ok(Self::price_premium(&env, &info, now, side))
+        let price_scale = Self::price_scale(&env);
+        Ok(Self::price_premium(&env, &info, now, side, price_scale))
     }
 
     /// Errors: SeriesNotFound, SeriesExpired, SlippageExceeded, InsufficientFreeCollateral
@@ -272,13 +277,14 @@ impl AmmPool {
             return Err(Error::SeriesExpired);
         }
 
-        let premium_per_unit = Self::price_premium(&env, &info, now, side);
-        let premium_paid = premium_per_unit.checked_mul(size).expect("premium mul overflow") / PRICE_SCALE;
+        let price_scale = Self::price_scale(&env);
+        let premium_per_unit = Self::price_premium(&env, &info, now, side, price_scale);
+        let premium_paid = premium_per_unit.checked_mul(size).expect("premium mul overflow") / price_scale;
         if premium_paid > max_premium {
             return Err(Error::SlippageExceeded);
         }
 
-        let notional = info.strike.checked_mul(size).expect("notional mul overflow") / PRICE_SCALE;
+        let notional = info.strike.checked_mul(size).expect("notional mul overflow") / price_scale;
 
         let vault_addr: Address = env.storage().instance().get(&DataKey::VaultAddr).unwrap();
         let vault = VaultAccountingClient::new(&env, &vault_addr);
@@ -338,6 +344,7 @@ impl AmmPool {
             return Err(Error::NoOpenPosition);
         }
 
+        let price_scale = Self::price_scale(&env);
         let premium_per_unit = if now >= info.expiry {
             let oracle_addr: Address = env.storage().instance().get(&DataKey::OracleAddr).unwrap();
             let oracle = OracleAdapterClient::new(&env, &oracle_addr);
@@ -347,14 +354,14 @@ impl AmmPool {
                 Side::Put => (info.strike - spot).max(0),
             }
         } else {
-            Self::price_premium(&env, &info, now, side)
+            Self::price_premium(&env, &info, now, side, price_scale)
         };
-        let proceeds = premium_per_unit.checked_mul(size).expect("proceeds mul overflow") / PRICE_SCALE;
+        let proceeds = premium_per_unit.checked_mul(size).expect("proceeds mul overflow") / price_scale;
         if proceeds < min_premium {
             return Err(Error::SlippageExceeded);
         }
 
-        let notional_release = info.strike.checked_mul(size).expect("notional mul overflow") / PRICE_SCALE;
+        let notional_release = info.strike.checked_mul(size).expect("notional mul overflow") / price_scale;
 
         let vault_addr: Address = env.storage().instance().get(&DataKey::VaultAddr).unwrap();
         let vault = VaultAccountingClient::new(&env, &vault_addr);
@@ -395,12 +402,16 @@ impl AmmPool {
             .ok_or(Error::SeriesNotFound)
     }
 
-    fn price_premium(env: &Env, info: &SeriesInfo, now: u64, side: Side) -> i128 {
+    fn price_premium(env: &Env, info: &SeriesInfo, now: u64, side: Side, price_scale: i128) -> i128 {
         let oracle_addr: Address = env.storage().instance().get(&DataKey::OracleAddr).unwrap();
         let oracle = OracleAdapterClient::new(env, &oracle_addr);
         let (spot, _ts) = oracle.get_price(&info.underlying);
         let sigma = oracle.get_realized_vol(&info.underlying, &REALIZED_VOL_WINDOW_SECS);
-        black_scholes(spot, info.strike, sigma, info.expiry, now, side)
+        black_scholes(spot, info.strike, sigma, info.expiry, now, side, price_scale)
+    }
+
+    fn price_scale(env: &Env) -> i128 {
+        env.storage().instance().get(&DataKey::PriceScale).unwrap()
     }
 }
 
@@ -412,10 +423,11 @@ fn assets_eq(a: &Asset, b: &Asset) -> bool {
     }
 }
 
-/// Black-Scholes premium in PRICE_SCALE fixed point. r = 0 for v1 (no
+/// Black-Scholes premium in `price_scale` fixed point (the oracle's own
+/// `10^decimals` — see PriceScale in storage). r = 0 for v1 (no
 /// yield-curve integration yet) — an MVP simplification per the technical
 /// spec's pricing model section.
-fn black_scholes(spot: i128, strike: i128, sigma_1e6: u32, expiry: u64, now: u64, side: Side) -> i128 {
+fn black_scholes(spot: i128, strike: i128, sigma_1e6: u32, expiry: u64, now: u64, side: Side, price_scale: i128) -> i128 {
     let intrinsic = match side {
         Side::Call => (spot - strike).max(0),
         Side::Put => (strike - spot).max(0),
@@ -436,8 +448,8 @@ fn black_scholes(spot: i128, strike: i128, sigma_1e6: u32, expiry: u64, now: u64
         return intrinsic;
     }
 
-    let spot_m = spot.checked_mul(MATH_TO_PRICE).expect("spot scale overflow");
-    let strike_m = strike.checked_mul(MATH_TO_PRICE).expect("strike scale overflow");
+    let spot_m = to_math_scale(spot, price_scale);
+    let strike_m = to_math_scale(strike, price_scale);
     let ln_ratio = fp_ln(fp_div(spot_m, strike_m));
     let sigma_sq_half_t = fp_mul(fp_mul(sigma_m, sigma_m) / 2, t_m);
     let d1 = fp_div(ln_ratio + sigma_sq_half_t, sigma_sqrt_t);
@@ -448,7 +460,7 @@ fn black_scholes(spot: i128, strike: i128, sigma_1e6: u32, expiry: u64, now: u64
         Side::Put => fp_mul(strike_m, normal_cdf(-d2)) - fp_mul(spot_m, normal_cdf(-d1)),
     };
 
-    (premium_m / MATH_TO_PRICE).max(0)
+    from_math_scale(premium_m, price_scale).max(0)
 }
 
 #[cfg(test)]

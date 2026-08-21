@@ -136,7 +136,10 @@ Normalizes the SEP-40 feed into Umbra's internal interface; fails closed on stal
 | get_price | `asset: Asset` | `(i128, u64)` | StalePrice, PriceUnavailable |
 | get_twap | `asset: Asset, window_secs: u64` | `i128` | InsufficientHistory |
 | get_realized_vol | `asset: Asset, window_secs: u64` | `u32` (annualized, 1e-6 scale) | InsufficientHistory |
+| decimals | — | `u32` | — |
 | set_max_staleness | `admin: Address, secs: u64` | `()` | NotAuthorized |
+
+`decimals` is a plain pass-through to the underlying Reflector feed's `decimals()`. `amm-pool` and `settlement-keeper` both call it once, at their own `initialize()`, and cache the resulting `10^decimals` as their own `PriceScale` — never a hardcoded constant. This matters in practice: Reflector's testnet CEX/DEX feed (`CCYOZJCOPG34LLQQ7N24YXBM7LL62R7ONMZ3G6WZAAYPB5OYKOMJRN63`) reports 14 decimals, not the 7-decimal stroop scale it's tempting to assume by default.
 
 ### Events
 

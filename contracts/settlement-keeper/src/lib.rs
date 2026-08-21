@@ -16,10 +16,6 @@ use vault_accounting::VaultAccountingClient;
 const LEDGER_THRESHOLD: u32 = 17_280;
 const LEDGER_BUMP_TO: u32 = 535_680;
 
-/// Must match amm-pool's PRICE_SCALE — both contracts price the same
-/// strike/premium values and need a shared fixed-point convention.
-const PRICE_SCALE: i128 = 10_000_000;
-
 #[contracttype]
 #[derive(Clone)]
 enum DataKey {
@@ -29,6 +25,11 @@ enum DataKey {
     AmmPoolAddr,
     TokenAddr,
     KeeperRewardBps,
+    /// 10^decimals for the oracle's price feed — must match amm-pool's own
+    /// PriceScale, since both price the same strike/spot values. Read
+    /// once at initialize() via oracle-adapter.decimals(), same as
+    /// amm-pool, rather than hardcoded.
+    PriceScale,
     Settled(u64),
 }
 
@@ -59,11 +60,15 @@ impl SettlementKeeper {
         if env.storage().instance().has(&DataKey::OracleAddr) {
             return Err(Error::AlreadyInitialized);
         }
+        let decimals = OracleAdapterClient::new(&env, &oracle).decimals();
+        let price_scale = 10i128.checked_pow(decimals).expect("price scale overflow");
+
         env.storage().instance().set(&DataKey::OracleAddr, &oracle);
         env.storage().instance().set(&DataKey::VaultAddr, &vault);
         env.storage().instance().set(&DataKey::FactoryAddr, &factory);
         env.storage().instance().set(&DataKey::AmmPoolAddr, &amm_pool);
         env.storage().instance().set(&DataKey::TokenAddr, &token);
+        env.storage().instance().set(&DataKey::PriceScale, &price_scale);
         env.storage()
             .instance()
             .set(&DataKey::KeeperRewardBps, &keeper_reward_bps);
@@ -119,6 +124,7 @@ impl SettlementKeeper {
         let token_addr: Address = env.storage().instance().get(&DataKey::TokenAddr).unwrap();
         let token = soroban_sdk::token::Client::new(&env, &token_addr);
         let self_addr = env.current_contract_address();
+        let price_scale: i128 = env.storage().instance().get(&DataKey::PriceScale).unwrap();
 
         let holders = amm.holders_of_series(&series_id);
         let mut total_payout: i128 = 0;
@@ -130,12 +136,12 @@ impl SettlementKeeper {
                     continue;
                 }
 
-                let notional = info.strike.checked_mul(pos.size).expect("notional mul overflow") / PRICE_SCALE;
+                let notional = info.strike.checked_mul(pos.size).expect("notional mul overflow") / price_scale;
                 let intrinsic_per_unit = match side {
                     Side::Call => (final_price - info.strike).max(0),
                     Side::Put => (info.strike - final_price).max(0),
                 };
-                let raw_payout = intrinsic_per_unit.checked_mul(pos.size).expect("payout mul overflow") / PRICE_SCALE;
+                let raw_payout = intrinsic_per_unit.checked_mul(pos.size).expect("payout mul overflow") / price_scale;
                 // MVP cap: a call's true intrinsic value is unbounded above
                 // strike, but the pool only ever locked `notional` — see
                 // the technical spec's note on amm-pool's full-collateral

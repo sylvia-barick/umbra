@@ -53,6 +53,7 @@ pub enum Error {
 pub trait OracleAdapterInterface {
     fn get_price(env: Env, asset: Asset) -> (i128, u64);
     fn get_realized_vol(env: Env, asset: Asset, window_secs: u64) -> u32;
+    fn decimals(env: Env) -> u32;
 }
 
 #[cfg(feature = "contract")]
@@ -73,6 +74,15 @@ impl OracleAdapter {
         env.storage().instance().set(&DataKey::MaxStaleness, &max_staleness);
         env.storage().instance().extend_ttl(LEDGER_THRESHOLD, LEDGER_BUMP_TO);
         Ok(())
+    }
+
+    /// Pass-through to the underlying Reflector feed's decimal scale.
+    /// Never hardcode a scale for spot/strike values — read this at
+    /// integration time, since it differs per asset feed (e.g. Reflector's
+    /// CEX/DEX feed uses 14 decimals, its Stellar DEX feed may differ).
+    pub fn decimals(env: Env) -> u32 {
+        let reflector: Address = env.storage().instance().get(&DataKey::ReflectorAddr).unwrap();
+        PriceFeedClient::new(&env, &reflector).decimals()
     }
 
     /// Errors: StalePrice, PriceUnavailable

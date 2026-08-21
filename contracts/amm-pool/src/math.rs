@@ -18,6 +18,20 @@ pub fn fp_div(a: i128, b: i128) -> i128 {
     a.checked_mul(MATH_SCALE).expect("fp_div overflow") / b
 }
 
+/// Converts a value from an arbitrary fixed-point `scale` (e.g. an
+/// oracle's `10^decimals`) into MATH_SCALE, via multiply-then-divide —
+/// works regardless of whether `scale` is larger or smaller than
+/// MATH_SCALE, unlike a precomputed integer ratio (which truncates to
+/// zero whenever `scale` exceeds MATH_SCALE).
+pub fn to_math_scale(value: i128, scale: i128) -> i128 {
+    value.checked_mul(MATH_SCALE).expect("to_math_scale overflow") / scale
+}
+
+/// Inverse of `to_math_scale`.
+pub fn from_math_scale(value: i128, scale: i128) -> i128 {
+    value.checked_mul(scale).expect("from_math_scale overflow") / MATH_SCALE
+}
+
 /// Integer square root (floor), Babylonian method.
 fn isqrt(n: u128) -> u128 {
     if n == 0 {

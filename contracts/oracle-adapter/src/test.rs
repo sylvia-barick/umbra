@@ -49,6 +49,12 @@ fn setup() -> Setup {
 }
 
 #[test]
+fn decimals_passes_through_to_reflector() {
+    let s = setup();
+    assert_eq!(s.oracle.decimals(), 7);
+}
+
+#[test]
 fn get_price_happy_path() {
     let s = setup();
     let now = s.env.ledger().timestamp();
