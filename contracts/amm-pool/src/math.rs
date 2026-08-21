@@ -18,18 +18,23 @@ pub fn fp_div(a: i128, b: i128) -> i128 {
     a.checked_mul(MATH_SCALE).expect("fp_div overflow") / b
 }
 
+/// Converts a value from one fixed-point scale to another, via
+/// multiply-then-divide — works regardless of which scale is larger,
+/// unlike a precomputed integer ratio (which truncates to zero whenever
+/// `from_scale` exceeds `to_scale`).
+pub fn rescale(value: i128, from_scale: i128, to_scale: i128) -> i128 {
+    value.checked_mul(to_scale).expect("rescale overflow") / from_scale
+}
+
 /// Converts a value from an arbitrary fixed-point `scale` (e.g. an
-/// oracle's `10^decimals`) into MATH_SCALE, via multiply-then-divide —
-/// works regardless of whether `scale` is larger or smaller than
-/// MATH_SCALE, unlike a precomputed integer ratio (which truncates to
-/// zero whenever `scale` exceeds MATH_SCALE).
+/// oracle's `10^decimals`) into MATH_SCALE.
 pub fn to_math_scale(value: i128, scale: i128) -> i128 {
-    value.checked_mul(MATH_SCALE).expect("to_math_scale overflow") / scale
+    rescale(value, scale, MATH_SCALE)
 }
 
 /// Inverse of `to_math_scale`.
 pub fn from_math_scale(value: i128, scale: i128) -> i128 {
-    value.checked_mul(scale).expect("from_math_scale overflow") / MATH_SCALE
+    rescale(value, MATH_SCALE, scale)
 }
 
 /// Integer square root (floor), Babylonian method.
@@ -56,10 +61,20 @@ pub fn fp_sqrt(x: i128) -> i128 {
 
 /// e^x in MATH_SCALE fixed point, via scaling-and-squaring: e^x = (e^(x/2^K))^(2^K),
 /// with a 5-term Taylor series for the small exponent x/2^K.
+///
+/// |x| is clamped to 40 (in real terms) before computing: e^40 * MATH_SCALE
+/// is ~2.35e26, safely within i128 (max ~1.7e38) through every repeated-
+/// squaring step, whereas an unclamped x around 100+ — which genuinely
+/// occurs in normal_cdf for near-expiry, moderately-ITM options, where d1
+/// blows up because sigma*sqrt(T) is tiny — overflows i128 partway through
+/// squaring. Mathematically safe: e^-40 (~4e-18) and e^40 are already far
+/// beyond any precision this approximation carries, so clamping changes
+/// nothing observable.
 pub fn fp_exp(x: i128) -> i128 {
     const K: u32 = 16;
+    const MAX_EXPONENT: i128 = 40 * MATH_SCALE;
     let neg = x < 0;
-    let ax = if neg { -x } else { x };
+    let ax = (if neg { -x } else { x }).min(MAX_EXPONENT);
     let y = ax / (1i128 << K);
 
     let y2 = fp_mul(y, y);
@@ -189,6 +204,18 @@ mod test {
     #[test]
     fn cdf_large_positive_approaches_one() {
         assert_close(normal_cdf(5 * MATH_SCALE), MATH_SCALE, 1_000_000);
+    }
+
+    #[test]
+    fn cdf_extreme_value_does_not_overflow() {
+        // Reproduces a live-testnet failure: a near-expiry, moderately-ITM
+        // option pushes d1 to ~14.7 (sigma*sqrt(T) tiny relative to
+        // ln(S/K)), and normal_cdf's internal exp(-x^2/2) call computes
+        // exp(-108) — which overflowed i128 before fp_exp clamped its
+        // exponent. Must return ~1.0 (deep ITM), not panic.
+        assert_close(normal_cdf(15 * MATH_SCALE), MATH_SCALE, 1_000_000);
+        assert_close(normal_cdf(100 * MATH_SCALE), MATH_SCALE, 1_000_000);
+        assert_close(normal_cdf(-100 * MATH_SCALE), 0, 1_000_000);
     }
 
     #[test]

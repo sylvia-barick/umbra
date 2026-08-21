@@ -141,6 +141,8 @@ Normalizes the SEP-40 feed into Umbra's internal interface; fails closed on stal
 
 `decimals` is a plain pass-through to the underlying Reflector feed's `decimals()`. `amm-pool` and `settlement-keeper` both call it once, at their own `initialize()`, and cache the resulting `10^decimals` as their own `PriceScale` — never a hardcoded constant. This matters in practice: Reflector's testnet CEX/DEX feed (`CCYOZJCOPG34LLQQ7N24YXBM7LL62R7ONMZ3G6WZAAYPB5OYKOMJRN63`) reports 14 decimals, not the 7-decimal stroop scale it's tempting to assume by default.
 
+**A second, sharper version of the same trap:** `PriceScale` (the oracle's decimals) and the collateral token's own decimals are two *independent* numbers — Reflector's feed and a SEP-41 token are different assets with no relationship between their decimal counts. `amm-pool` and `settlement-keeper` both also cache a separate `TokenScale` (read from the collateral token's own `decimals()`) and rescale every notional/premium/payout value from `PriceScale` into `TokenScale` at the last possible moment, immediately before it touches `vault-accounting` or a token transfer. Conflating the two — passing a `PriceScale`-denominated value directly as a token amount — silently computed a notional 10,000,000× too large in an early testnet deployment (Reflector's 14 decimals vs. native XLM's 7): a 1,000-XLM LP pool tried to lock 1.8 million XLM for a single ~$0.18-strike contract. Caught and regression-tested (`buy_with_mismatched_oracle_and_token_decimals_computes_correct_notional` in `amm-pool`'s test suite) before mainnet consideration — worth calling out explicitly since it's the kind of bug that only surfaces once the two scales actually differ, which no amount of testing against same-scale mocks will catch.
+
 ### Events
 
 | Event | Topics | Data |
@@ -219,7 +221,7 @@ d1 = [ln(S/K) + (σ²/2)·T] / (σ·√T)
 d2 = d1 − σ·√T
 
 S  = spot, from oracle-adapter.get_price
-σ  = realized volatility, from oracle-adapter.get_realized_vol (30d window)
+σ  = realized volatility, from oracle-adapter.get_realized_vol (1hr window — see the implementation note below; the spec's original 30d window is not executable on-chain against the live feed)
 T  = (expiry − now) / seconds_per_year
 K  = strike, fixed at series creation
 ```
@@ -227,6 +229,8 @@ K  = strike, fixed at series creation
 **On-chain N(x) approximation.** Soroban has no floating point. N(x) (the standard normal CDF) is computed via a fixed-point rational approximation (Abramowitz–Stegun 26.2.17 or equivalent), or — given v1's fixed weekly/monthly expiry grid bounds the range of realistic moneyness — a precomputed lookup table indexed by discretized d1/d2 buckets, linearly interpolated. The lookup table is the cheaper option in compute units and is the recommended default; the rational approximation is the fallback if bucket resolution proves too coarse in testing.
 
 *Implementation note:* v1 ships the rational-approximation fallback (Abramowitz–Stegun 26.2.17), not the lookup table — simpler to implement correctly and to unit-test against closed-form sanity checks (`N(0) = 0.5`, symmetry, tail behavior) without needing to pre-generate and validate a bucket table. `ln`, `exp`, and `sqrt` are hand-rolled fixed-point helpers (`contracts/amm-pool/src/math.rs`, 1e9 internal scale) since Soroban's `no_std` environment has none of these available. Revisit the lookup table if the rational approximation's compute-unit cost proves too high in practice.
+
+*Implementation note — realized-vol window:* verified live against testnet's Reflector CEX/DEX feed, a `prices()` call requesting more than ~20 records at the feed's 300s resolution exceeds the transaction's resource budget (confirmed empirically: 20 records succeeds, 24 fails) — well short of the 8640 records a literal 30-day window would need. `amm-pool` uses a 1-hour window (12 records) instead, comfortably clearing `oracle-adapter`'s `MIN_VOL_SAMPLES` (8) floor with margin for feed gaps. This trades off longer-horizon volatility accuracy for the window actually being executable on-chain — worth revisiting if Reflector or Soroban's resource limits change, or if a wider window turns out to be needed for pricing quality.
 
 *MVP simplification — call notional bound:* the pool locks `strike × size` as collateral per contract regardless of side. This is exact for puts (max payout is bounded by strike) but is a cap, not the true unbounded upside, for calls — a spot price more than 2× the strike at settlement pays out capped at the locked notional rather than true intrinsic value. Flagged here in the same spirit as the `r = 0` simplification above; revisit before mainnet if deep ITM calls are expected to be common.
 

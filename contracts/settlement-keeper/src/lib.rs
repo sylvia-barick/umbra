@@ -30,7 +30,22 @@ enum DataKey {
     /// once at initialize() via oracle-adapter.decimals(), same as
     /// amm-pool, rather than hardcoded.
     PriceScale,
+    /// 10^decimals for the collateral token — must match amm-pool's own
+    /// TokenScale. Distinct from PriceScale for the same reason it is in
+    /// amm-pool: the oracle feed and the collateral token are different
+    /// assets with independent decimal counts, so notional/payout values
+    /// computed in PriceScale must be rescaled before any actual fund
+    /// movement through vault-accounting or a token transfer.
+    TokenScale,
     Settled(u64),
+}
+
+/// Converts a value from one fixed-point scale to another, via
+/// multiply-then-divide — mirrors amm-pool's math::rescale (kept local
+/// here rather than shared, since it's a single three-line function and
+/// amm-pool's math module isn't part of its public interface).
+fn rescale(value: i128, from_scale: i128, to_scale: i128) -> i128 {
+    value.checked_mul(to_scale).expect("rescale overflow") / from_scale
 }
 
 #[contracterror]
@@ -62,6 +77,8 @@ impl SettlementKeeper {
         }
         let decimals = OracleAdapterClient::new(&env, &oracle).decimals();
         let price_scale = 10i128.checked_pow(decimals).expect("price scale overflow");
+        let token_decimals = soroban_sdk::token::Client::new(&env, &token).decimals();
+        let token_scale = 10i128.checked_pow(token_decimals).expect("token scale overflow");
 
         env.storage().instance().set(&DataKey::OracleAddr, &oracle);
         env.storage().instance().set(&DataKey::VaultAddr, &vault);
@@ -69,6 +86,7 @@ impl SettlementKeeper {
         env.storage().instance().set(&DataKey::AmmPoolAddr, &amm_pool);
         env.storage().instance().set(&DataKey::TokenAddr, &token);
         env.storage().instance().set(&DataKey::PriceScale, &price_scale);
+        env.storage().instance().set(&DataKey::TokenScale, &token_scale);
         env.storage()
             .instance()
             .set(&DataKey::KeeperRewardBps, &keeper_reward_bps);
@@ -125,6 +143,7 @@ impl SettlementKeeper {
         let token = soroban_sdk::token::Client::new(&env, &token_addr);
         let self_addr = env.current_contract_address();
         let price_scale: i128 = env.storage().instance().get(&DataKey::PriceScale).unwrap();
+        let token_scale: i128 = env.storage().instance().get(&DataKey::TokenScale).unwrap();
 
         let holders = amm.holders_of_series(&series_id);
         let mut total_payout: i128 = 0;
@@ -136,12 +155,14 @@ impl SettlementKeeper {
                     continue;
                 }
 
-                let notional = info.strike.checked_mul(pos.size).expect("notional mul overflow") / price_scale;
+                let notional_price_scale = info.strike.checked_mul(pos.size).expect("notional mul overflow") / price_scale;
+                let notional = rescale(notional_price_scale, price_scale, token_scale);
                 let intrinsic_per_unit = match side {
                     Side::Call => (final_price - info.strike).max(0),
                     Side::Put => (info.strike - final_price).max(0),
                 };
-                let raw_payout = intrinsic_per_unit.checked_mul(pos.size).expect("payout mul overflow") / price_scale;
+                let raw_payout_price_scale = intrinsic_per_unit.checked_mul(pos.size).expect("payout mul overflow") / price_scale;
+                let raw_payout = rescale(raw_payout_price_scale, price_scale, token_scale);
                 // MVP cap: a call's true intrinsic value is unbounded above
                 // strike, but the pool only ever locked `notional` — see
                 // the technical spec's note on amm-pool's full-collateral

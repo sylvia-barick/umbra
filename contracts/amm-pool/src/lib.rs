@@ -11,7 +11,7 @@
 
 mod math;
 
-use math::{fp_div, fp_ln, fp_mul, fp_sqrt, from_math_scale, normal_cdf, to_math_scale, MATH_SCALE};
+use math::{fp_div, fp_ln, fp_mul, fp_sqrt, from_math_scale, normal_cdf, rescale, to_math_scale, MATH_SCALE};
 use oracle_adapter::OracleAdapterClient;
 use sep_40_oracle::Asset;
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Vec};
@@ -21,8 +21,16 @@ const LEDGER_THRESHOLD: u32 = 17_280;
 const LEDGER_BUMP_TO: u32 = 535_680;
 
 const SECONDS_PER_YEAR: i128 = 31_536_000;
-/// Trailing window used for realized-volatility lookups, per spec (30d).
-const REALIZED_VOL_WINDOW_SECS: u64 = 30 * 86_400;
+
+/// Trailing window used for realized-volatility lookups. The spec's
+/// original 30d window (8640 records at Reflector's 300s resolution) is
+/// impractical on-chain: verified against the live testnet feed, a
+/// `prices()` call fetching more than ~20 records exceeds the
+/// transaction's resource budget before oracle-adapter's own
+/// cross-contract overhead is even added. 1 hour (12 records) leaves
+/// comfortable headroom while still clearing MIN_VOL_SAMPLES (8) with
+/// margin for gaps in the feed.
+const REALIZED_VOL_WINDOW_SECS: u64 = 3_600;
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,10 +66,20 @@ enum DataKey {
     FeeBps,
     /// 10^decimals for the oracle's price feed, read once at initialize()
     /// via oracle-adapter.decimals() and cached — spot/strike/size/premium
-    /// all share this scale. Never hardcode it: Reflector's feeds differ
-    /// (e.g. 14 decimals on the CEX/DEX feed), and it must be read at
-    /// integration time per the technical spec's scale-discipline note.
+    /// all share this scale for valuation math. Never hardcode it:
+    /// Reflector's feeds differ (e.g. 14 decimals on the CEX/DEX feed),
+    /// and it must be read at integration time per the technical spec's
+    /// scale-discipline note.
     PriceScale,
+    /// 10^decimals for the collateral token, read once at initialize()
+    /// via the token's own decimals(). Distinct from PriceScale on
+    /// purpose: the oracle's feed and the collateral token are different
+    /// assets with independently-set decimal counts (e.g. Reflector's
+    /// 14-decimal feed vs. native XLM's 7-decimal SAC) — notional and
+    /// premium are computed in PriceScale for valuation, then rescaled
+    /// into TokenScale before any actual fund movement through
+    /// vault-accounting or a token transfer.
+    TokenScale,
     SupportedUnderlyings,
     SeriesMeta(u64),
     Position(Address, u64, Side),
@@ -119,6 +137,8 @@ impl AmmPool {
         admin.require_auth();
         let decimals = OracleAdapterClient::new(&env, &oracle).decimals();
         let price_scale = 10i128.checked_pow(decimals).expect("price scale overflow");
+        let token_decimals = soroban_sdk::token::Client::new(&env, &token).decimals();
+        let token_scale = 10i128.checked_pow(token_decimals).expect("token scale overflow");
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::OracleAddr, &oracle);
@@ -126,6 +146,7 @@ impl AmmPool {
         env.storage().instance().set(&DataKey::TokenAddr, &token);
         env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
         env.storage().instance().set(&DataKey::PriceScale, &price_scale);
+        env.storage().instance().set(&DataKey::TokenScale, &token_scale);
         env.storage()
             .instance()
             .set(&DataKey::SupportedUnderlyings, &underlyings);
@@ -250,6 +271,10 @@ impl AmmPool {
         Ok(())
     }
 
+    /// Returns the premium in the collateral token's own scale (what
+    /// buy() will actually charge) — not the oracle's price scale used
+    /// internally for valuation.
+    ///
     /// Errors: SeriesNotFound, SeriesExpired
     pub fn quote(env: Env, series_id: u64, side: Side) -> Result<i128, Error> {
         let info = Self::series_info(&env, series_id)?;
@@ -258,7 +283,9 @@ impl AmmPool {
             return Err(Error::SeriesExpired);
         }
         let price_scale = Self::price_scale(&env);
-        Ok(Self::price_premium(&env, &info, now, side, price_scale))
+        let token_scale = Self::token_scale(&env);
+        let premium_per_unit = Self::price_premium(&env, &info, now, side, price_scale);
+        Ok(rescale(premium_per_unit, price_scale, token_scale))
     }
 
     /// Errors: SeriesNotFound, SeriesExpired, SlippageExceeded, InsufficientFreeCollateral
@@ -278,13 +305,16 @@ impl AmmPool {
         }
 
         let price_scale = Self::price_scale(&env);
+        let token_scale = Self::token_scale(&env);
         let premium_per_unit = Self::price_premium(&env, &info, now, side, price_scale);
-        let premium_paid = premium_per_unit.checked_mul(size).expect("premium mul overflow") / price_scale;
+        let premium_paid_price_scale = premium_per_unit.checked_mul(size).expect("premium mul overflow") / price_scale;
+        let premium_paid = rescale(premium_paid_price_scale, price_scale, token_scale);
         if premium_paid > max_premium {
             return Err(Error::SlippageExceeded);
         }
 
-        let notional = info.strike.checked_mul(size).expect("notional mul overflow") / price_scale;
+        let notional_price_scale = info.strike.checked_mul(size).expect("notional mul overflow") / price_scale;
+        let notional = rescale(notional_price_scale, price_scale, token_scale);
 
         let vault_addr: Address = env.storage().instance().get(&DataKey::VaultAddr).unwrap();
         let vault = VaultAccountingClient::new(&env, &vault_addr);
@@ -356,12 +386,15 @@ impl AmmPool {
         } else {
             Self::price_premium(&env, &info, now, side, price_scale)
         };
-        let proceeds = premium_per_unit.checked_mul(size).expect("proceeds mul overflow") / price_scale;
+        let token_scale = Self::token_scale(&env);
+        let proceeds_price_scale = premium_per_unit.checked_mul(size).expect("proceeds mul overflow") / price_scale;
+        let proceeds = rescale(proceeds_price_scale, price_scale, token_scale);
         if proceeds < min_premium {
             return Err(Error::SlippageExceeded);
         }
 
-        let notional_release = info.strike.checked_mul(size).expect("notional mul overflow") / price_scale;
+        let notional_release_price_scale = info.strike.checked_mul(size).expect("notional mul overflow") / price_scale;
+        let notional_release = rescale(notional_release_price_scale, price_scale, token_scale);
 
         let vault_addr: Address = env.storage().instance().get(&DataKey::VaultAddr).unwrap();
         let vault = VaultAccountingClient::new(&env, &vault_addr);
@@ -412,6 +445,10 @@ impl AmmPool {
 
     fn price_scale(env: &Env) -> i128 {
         env.storage().instance().get(&DataKey::PriceScale).unwrap()
+    }
+
+    fn token_scale(env: &Env) -> i128 {
+        env.storage().instance().get(&DataKey::TokenScale).unwrap()
     }
 }
 
