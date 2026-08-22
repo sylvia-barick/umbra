@@ -1,42 +1,28 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useWallet } from "@/app/providers";
 import { vaultAccountingClient } from "@/lib/contracts";
 import { formatFixed, parseFixed } from "@/lib/format";
-import { getUserShares } from "@/lib/ledger";
 import { useTx } from "@/hooks/useTx";
-import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Badge } from "@/components/ui/Badge";
 
 interface VaultPanelProps {
   sharePrice: bigint | null;
+  shares: bigint | null;
   tokenSymbol: string;
   tokenDecimals: number;
   walletBalance: bigint | null;
   onChanged: () => void;
 }
 
-export function VaultPanel({ sharePrice, tokenSymbol, tokenDecimals, walletBalance, onChanged }: VaultPanelProps) {
+export function VaultPanel({ sharePrice, shares, tokenSymbol, tokenDecimals, walletBalance, onChanged }: VaultPanelProps) {
   const wallet = useWallet();
   const { run, busy } = useTx();
   const [tab, setTab] = useState<"deposit" | "withdraw">("deposit");
   const [amount, setAmount] = useState("");
-  const [shares, setShares] = useState<bigint | null>(null);
-
-  useEffect(() => {
-    if (!wallet.address) {
-      setShares(null);
-      return;
-    }
-    let cancelled = false;
-    getUserShares(wallet.address).then((s) => !cancelled && setShares(s));
-    return () => {
-      cancelled = true;
-    };
-  }, [wallet.address, sharePrice]);
 
   const holdingsValue =
     shares !== null && sharePrice !== null ? (shares * sharePrice) / 10n ** BigInt(tokenDecimals) : null;
@@ -69,18 +55,14 @@ export function VaultPanel({ sharePrice, tokenSymbol, tokenDecimals, walletBalan
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <div>
-          <h3 className="text-sm font-semibold text-umbra-ink">LP Vault</h3>
-          <p className="mt-0.5 text-xs text-umbra-muted">Deposit collateral, earn premiums as a market maker.</p>
-        </div>
+    <div className="space-y-5">
+      <div className="flex items-center justify-between">
+        <p className="text-xs text-umbra-muted">Deposit collateral, earn premiums as a market maker.</p>
         <Badge tone="violet">
           1 share = {sharePrice !== null ? formatFixed(sharePrice, tokenDecimals) : "—"} {tokenSymbol}
         </Badge>
-      </CardHeader>
-      <CardBody className="space-y-5">
-        {wallet.connected && (
+      </div>
+      {wallet.connected && (
           <div className="grid grid-cols-2 gap-3 rounded-lg border border-umbra-border-soft bg-umbra-panel-raised p-3.5 text-sm">
             <div>
               <div className="text-[11px] uppercase tracking-wide text-umbra-faint">Your shares</div>
@@ -154,7 +136,6 @@ export function VaultPanel({ sharePrice, tokenSymbol, tokenDecimals, walletBalan
             {tab === "deposit" ? "Deposit" : "Withdraw"}
           </Button>
         )}
-      </CardBody>
-    </Card>
+    </div>
   );
 }

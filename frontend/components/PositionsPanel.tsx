@@ -5,17 +5,10 @@ import { useWallet } from "@/app/providers";
 import { SeriesRow } from "@/hooks/useUmbraData";
 import { settlementKeeperClient } from "@/lib/contracts";
 import { formatFixed, formatSigned } from "@/lib/format";
+import { markToMarket, PositionRow } from "@/lib/positions";
 import { useTx } from "@/hooks/useTx";
-import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-
-interface PositionRow {
-  seriesId: bigint;
-  sideLabel: "Call" | "Put";
-  size: bigint;
-  premiumPaid: bigint;
-}
 
 interface PositionsPanelProps {
   positions: PositionRow[];
@@ -29,23 +22,9 @@ interface PositionsPanelProps {
   onChanged: () => void;
 }
 
-/** Marks a position to the AMM's own current quote for that series/side —
- * "what it would fetch if sold right now", the same number the trade panel
- * already shows, not a separate valuation model. Null when no live quote
- * is available yet (e.g. InsufficientHistory) rather than a misleading 0. */
-function markToMarket(
-  p: PositionRow,
-  info: SeriesRow | undefined,
-  priceDecimals: number,
-): { value: bigint; pnl: bigint } | null {
-  if (!info) return null;
-  const quote = p.sideLabel === "Call" ? info.callQuote : info.putQuote;
-  if (quote === null) return null;
-  const priceScale = 10n ** BigInt(priceDecimals);
-  const value = (quote * p.size) / priceScale;
-  return { value, pnl: value - p.premiumPaid };
-}
-
+/** Dense positions table for the bottom strip — Series/Side/Size/Entry/Mark/
+ * P&L columns, sitting alongside Activity instead of a full-width tab of
+ * its own, so both stay visible without switching views. */
 export function PositionsPanel({
   positions,
   loading,
@@ -73,32 +52,8 @@ export function PositionsPanel({
     const withMtm = rows.filter((r) => r.mtm !== null);
     if (withMtm.length === 0) return null;
     const pnl = withMtm.reduce((sum, r) => sum + r.mtm!.pnl, 0n);
-    const cost = withMtm.reduce((sum, r) => sum + r.p.premiumPaid, 0n);
-    return { pnl, cost, partial: withMtm.length < rows.length };
+    return { pnl, partial: withMtm.length < rows.length };
   }, [rows]);
-
-  if (!wallet.connected) {
-    return (
-      <Card>
-        <CardBody className="flex flex-col items-center gap-3 py-14 text-center">
-          <p className="text-sm text-umbra-muted">Connect your wallet to see your positions.</p>
-          <Button onClick={wallet.connect} loading={wallet.connecting}>
-            Connect Freighter
-          </Button>
-        </CardBody>
-      </Card>
-    );
-  }
-
-  if (!loading && positions.length === 0) {
-    return (
-      <Card>
-        <CardBody className="py-14 text-center text-sm text-umbra-muted">
-          No open positions yet — buy a call or put from Markets to get started.
-        </CardBody>
-      </Card>
-    );
-  }
 
   async function settle(seriesId: bigint) {
     if (!wallet.address) return;
@@ -115,67 +70,91 @@ export function PositionsPanel({
   const now = BigInt(Math.floor(Date.now() / 1000));
 
   return (
-    <Card>
-      <CardHeader>
-        <h3 className="text-sm font-semibold text-umbra-ink">Your positions</h3>
+    <div className="flex h-full flex-col overflow-hidden">
+      <div className="flex items-center gap-4 border-b border-umbra-border px-4 py-2">
+        <span className="text-sm font-semibold text-umbra-ink">Positions</span>
         {totals && (
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-umbra-faint">Unrealized P&L{totals.partial ? " (partial)" : ""}</span>
+          <span className="ml-auto flex items-center gap-1.5 text-xs">
+            <span className="text-umbra-faint">Total{totals.partial ? " (partial)" : ""}</span>
             <span className={`font-mono font-semibold tabular ${totals.pnl >= 0n ? "text-umbra-call" : "text-umbra-put"}`}>
               {formatSigned(totals.pnl, tokenDecimals)} {tokenSymbol}
             </span>
-          </div>
+          </span>
         )}
-      </CardHeader>
-      <div className="divide-y divide-umbra-border-soft">
-        {rows.map(({ p, row, mtm }) => {
-          const info = row?.info;
-          const expired = info ? info.expiry <= now : false;
-          return (
-            <div key={`${p.seriesId}-${p.sideLabel}`} className="flex items-center justify-between gap-4 px-5 py-4">
-              <div className="flex items-center gap-3">
-                <Badge tone={p.sideLabel === "Call" ? "call" : "put"}>{p.sideLabel}</Badge>
-                <div>
-                  <div className="font-mono text-sm tabular text-umbra-ink">
-                    {underlyingSymbol} {info ? `$${formatFixed(info.strike, priceDecimals, 2)}` : ""} · #{p.seriesId.toString()}
-                  </div>
-                  <div className="mt-0.5 text-xs text-umbra-faint">
-                    {formatFixed(p.size, priceDecimals)} {underlyingSymbol} · paid{" "}
-                    {formatFixed(p.premiumPaid, tokenDecimals)} {tokenSymbol}
-                  </div>
-                </div>
-              </div>
-              <div className="flex shrink-0 items-center gap-4">
-                {mtm && (
-                  <div className="text-right">
-                    <div className="font-mono text-sm tabular text-umbra-ink">
-                      {formatFixed(mtm.value, tokenDecimals)} {tokenSymbol}
-                    </div>
-                    <div className={`text-xs font-medium tabular ${mtm.pnl >= 0n ? "text-umbra-call" : "text-umbra-put"}`}>
-                      {formatSigned(mtm.pnl, tokenDecimals)}
-                    </div>
-                  </div>
-                )}
-                {expired ? (
-                  <Button size="sm" variant="secondary" loading={busy} onClick={() => settle(p.seriesId)}>
-                    Settle
-                  </Button>
-                ) : (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    onClick={() => {
-                      if (row) onOpenTrade(row, p.sideLabel === "Call" ? "call" : "put");
-                    }}
-                  >
-                    Manage
-                  </Button>
-                )}
-              </div>
-            </div>
-          );
-        })}
       </div>
-    </Card>
+
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {!wallet.connected ? (
+          <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center">
+            <p className="text-xs text-umbra-muted">Connect your wallet to see your positions.</p>
+            <Button size="sm" onClick={wallet.connect} loading={wallet.connecting}>
+              Connect Freighter
+            </Button>
+          </div>
+        ) : !loading && positions.length === 0 ? (
+          <div className="flex h-full items-center justify-center px-4 text-center text-xs text-umbra-muted">
+            No open positions — buy a call or put to get started.
+          </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-[1.6fr_0.6fr_0.7fr_0.9fr_0.9fr_1fr_auto] gap-2 px-4 py-1 text-[10px] uppercase tracking-wide text-umbra-faint">
+              <span>Series</span>
+              <span>Side</span>
+              <span className="text-right">Size</span>
+              <span className="text-right">Entry</span>
+              <span className="text-right">Mark</span>
+              <span className="text-right">P&L</span>
+              <span />
+            </div>
+            {rows.map(({ p, row, mtm }) => {
+              const info = row?.info;
+              const expired = info ? info.expiry <= now : false;
+              return (
+                <div
+                  key={`${p.seriesId}-${p.sideLabel}`}
+                  className="grid grid-cols-[1.6fr_0.6fr_0.7fr_0.9fr_0.9fr_1fr_auto] items-center gap-2 border-t border-umbra-border-soft px-4 py-1.5"
+                >
+                  <span className="truncate font-mono text-xs tabular text-umbra-ink">
+                    {underlyingSymbol} {info ? `$${formatFixed(info.strike, priceDecimals, 2)}` : ""} #{p.seriesId.toString()}
+                  </span>
+                  <Badge tone={p.sideLabel === "Call" ? "call" : "put"}>{p.sideLabel}</Badge>
+                  <span className="text-right font-mono text-xs tabular text-umbra-muted">
+                    {formatFixed(p.size, priceDecimals)}
+                  </span>
+                  <span className="text-right font-mono text-xs tabular text-umbra-muted">
+                    {formatFixed(p.premiumPaid, tokenDecimals)}
+                  </span>
+                  <span className="text-right font-mono text-xs tabular text-umbra-ink">
+                    {mtm ? formatFixed(mtm.value, tokenDecimals) : "—"}
+                  </span>
+                  <span
+                    className={`text-right font-mono text-xs font-medium tabular ${
+                      mtm ? (mtm.pnl >= 0n ? "text-umbra-call" : "text-umbra-put") : "text-umbra-faint"
+                    }`}
+                  >
+                    {mtm ? formatSigned(mtm.pnl, tokenDecimals) : "—"}
+                  </span>
+                  {expired ? (
+                    <Button size="sm" variant="secondary" loading={busy} onClick={() => settle(p.seriesId)}>
+                      Settle
+                    </Button>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        if (row) onOpenTrade(row, p.sideLabel === "Call" ? "call" : "put");
+                      }}
+                    >
+                      Manage
+                    </Button>
+                  )}
+                </div>
+              );
+            })}
+          </>
+        )}
+      </div>
+    </div>
   );
 }

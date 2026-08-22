@@ -11,15 +11,21 @@ import {
   useVaultStats,
   usePositions,
 } from "@/hooks/useUmbraData";
-import { READ_ONLY_ACCOUNT } from "@/lib/stellar";
-import { Tabs } from "@/components/Tabs";
-import { MarketView } from "@/components/MarketView";
+import { useSpot } from "@/hooks/useSpot";
+import { usePriceHistory } from "@/hooks/usePriceHistory";
+import { useActivity } from "@/hooks/useActivity";
+import { useVaultShares } from "@/hooks/useVaultShares";
+import { useVaultHistory } from "@/hooks/useVaultHistory";
+import { READ_ONLY_ACCOUNT, contracts } from "@/lib/stellar";
+import { summarizePositions } from "@/lib/positions";
+import { Navbar } from "@/components/Navbar";
+import { TickerTape } from "@/components/TickerTape";
+import { MarketSidebar } from "@/components/MarketSidebar";
+import { MarketTerminal } from "@/components/MarketTerminal";
 import { TradeDrawer } from "@/components/TradeDrawer";
 import { VaultPanel } from "@/components/VaultPanel";
-import { PositionsPanel } from "@/components/PositionsPanel";
 import { CreateSeriesModal } from "@/components/CreateSeriesModal";
-
-type TabKey = "markets" | "vault" | "positions";
+import { Modal } from "@/components/ui/Modal";
 
 export default function Home() {
   const wallet = useWallet();
@@ -29,14 +35,25 @@ export default function Home() {
   const refresh = () => setRefreshKey((k) => k + 1);
 
   const { series, loading: loadingSeries } = useSeriesList(readAddr, refreshKey);
-  const { sharePrice, loading: loadingVault } = useVaultStats(readAddr, refreshKey);
+  const { sharePrice } = useVaultStats(readAddr, refreshKey);
   const walletBalance = useTokenBalance(wallet.address, refreshKey);
   const { positions, loading: loadingPositions } = usePositions(wallet.address, series, refreshKey);
+  const userShares = useVaultShares(wallet.address, refreshKey);
 
-  const [tab, setTab] = useState<TabKey>("markets");
+  const underlyingSymbol = underlyingAsset().values[0];
+  const tokenSymbol = statics?.tokenSymbol ?? "USDC";
+  const tokenDecimals = statics?.tokenDecimals ?? 7;
+  const priceDecimals = statics?.priceDecimals ?? 14;
+
+  const spot = useSpot(refreshKey);
+  const history = usePriceHistory(priceDecimals);
+  const activity = useActivity(tokenDecimals, priceDecimals, refreshKey);
+  const vaultHistory = useVaultHistory(contracts.vaultAccounting, sharePrice, tokenDecimals);
+
   const [selected, setSelected] = useState<{ row: SeriesRow; side: "call" | "put" } | null>(null);
   const [manageTrade, setManageTrade] = useState<{ row: SeriesRow; side: "call" | "put" } | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [vaultOpen, setVaultOpen] = useState(false);
 
   // Keep the docked order panel pointed at a real series: default to the
   // first one once the list loads, and follow along if the selected series
@@ -55,64 +72,60 @@ export default function Home() {
     });
   }, [series]);
 
-  const underlyingSymbol = underlyingAsset().values[0];
-  const tokenSymbol = statics?.tokenSymbol ?? "USDC";
-  const tokenDecimals = statics?.tokenDecimals ?? 7;
-  const priceDecimals = statics?.priceDecimals ?? 14;
+  const vaultValue = userShares !== null && sharePrice !== null ? (userShares * sharePrice) / 10n ** BigInt(tokenDecimals) : null;
+  const posSummary = summarizePositions(positions, series, priceDecimals);
+  const portfolioValue = vaultValue !== null || posSummary !== null ? (vaultValue ?? 0n) + (posSummary?.markedValue ?? 0n) : null;
 
   return (
     <>
-      <Tabs
-        tabs={[
-          { key: "markets", label: "Markets", count: series.length },
-          { key: "vault", label: "Vault" },
-          { key: "positions", label: "Positions", count: positions.length },
-        ]}
-        active={tab}
-        onChange={setTab}
+      <Navbar
+        portfolioValue={wallet.connected ? portfolioValue : null}
+        pnl={wallet.connected ? posSummary?.pnl ?? (positions.length === 0 ? 0n : null) : null}
+        pnlPartial={posSummary?.partial ?? false}
+        openPositions={positions.length}
+        vaultApyPct={vaultHistory.annualizedPct}
+        tokenSymbol={tokenSymbol}
+        tokenDecimals={tokenDecimals}
       />
+      <TickerTape />
 
-      {tab === "markets" && (
-        <MarketView
+      <div className="flex min-h-0 flex-1">
+        <div className="w-[220px] shrink-0 overflow-y-auto border-r border-umbra-border bg-umbra-panel">
+          <MarketSidebar
+            underlyingSymbol={underlyingSymbol}
+            spot={spot}
+            changePct={history.changePct}
+            seriesCount={series.length}
+            vaultContractId={contracts.vaultAccounting}
+            sharePrice={sharePrice}
+            userShares={userShares}
+            tokenSymbol={tokenSymbol}
+            tokenDecimals={tokenDecimals}
+            priceDecimals={priceDecimals}
+            onOpenVault={() => setVaultOpen(true)}
+          />
+        </div>
+
+        <MarketTerminal
           series={series}
           loading={loadingSeries}
           selected={selected}
           onSelect={(row, side) => setSelected({ row, side })}
           onCreateSeries={() => setCreateOpen(true)}
           onTraded={refresh}
-          tokenSymbol={tokenSymbol}
-          tokenDecimals={tokenDecimals}
-          priceDecimals={priceDecimals}
-          underlyingSymbol={underlyingSymbol}
-          refreshKey={refreshKey}
-        />
-      )}
-
-      {tab === "vault" && (
-        <div className="max-w-md">
-          <VaultPanel
-            sharePrice={sharePrice}
-            tokenSymbol={tokenSymbol}
-            tokenDecimals={tokenDecimals}
-            walletBalance={walletBalance}
-            onChanged={refresh}
-          />
-        </div>
-      )}
-
-      {tab === "positions" && (
-        <PositionsPanel
           positions={positions}
-          loading={loadingPositions}
-          series={series}
+          loadingPositions={loadingPositions}
+          onOpenTrade={(row, side) => setManageTrade({ row, side })}
           tokenSymbol={tokenSymbol}
           tokenDecimals={tokenDecimals}
           priceDecimals={priceDecimals}
           underlyingSymbol={underlyingSymbol}
-          onOpenTrade={(row, side) => setManageTrade({ row, side })}
-          onChanged={refresh}
+          spot={spot}
+          history={history}
+          activityItems={activity.items}
+          activityLoading={activity.loading}
         />
-      )}
+      </div>
 
       <TradeDrawer
         row={manageTrade?.row ?? null}
@@ -124,6 +137,17 @@ export default function Home() {
         priceDecimals={priceDecimals}
         underlyingSymbol={underlyingSymbol}
       />
+
+      <Modal open={vaultOpen} onClose={() => setVaultOpen(false)} title="LP Vault">
+        <VaultPanel
+          sharePrice={sharePrice}
+          shares={userShares}
+          tokenSymbol={tokenSymbol}
+          tokenDecimals={tokenDecimals}
+          walletBalance={walletBalance}
+          onChanged={refresh}
+        />
+      </Modal>
 
       <CreateSeriesModal
         open={createOpen}
