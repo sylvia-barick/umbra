@@ -20,7 +20,7 @@ interface OrderFormProps {
   underlyingSymbol: string;
 }
 
-const SLIPPAGE_BPS = 200n; // 2%
+const SLIPPAGE_PRESETS_BPS = [50, 100, 200, 500] as const; // 0.5% / 1% / 2% / 5%
 
 export function OrderForm({
   row,
@@ -37,6 +37,7 @@ export function OrderForm({
   const [side, setSide] = useState<"call" | "put">(initialSide);
   const [sizeInput, setSizeInput] = useState("1");
   const [position, setPosition] = useState<{ size: bigint } | null>(null);
+  const [slippageBps, setSlippageBps] = useState<bigint>(200n);
 
   useEffect(() => {
     setSide(initialSide);
@@ -78,9 +79,28 @@ export function OrderForm({
   const bound =
     estimatedPremium !== null
       ? mode === "buy"
-        ? (estimatedPremium * (10000n + SLIPPAGE_BPS)) / 10000n
-        : (estimatedPremium * (10000n - SLIPPAGE_BPS)) / 10000n
+        ? (estimatedPremium * (10000n + slippageBps)) / 10000n
+        : (estimatedPremium * (10000n - slippageBps)) / 10000n
       : null;
+
+  // Display-only risk summary for a new buy: strike and premium share the
+  // oracle's price scale (see the strike-scale fix), so plain float division
+  // is fine here — nothing downstream uses these values for the actual
+  // transaction bounds. Payout is capped at notional per the contract's
+  // full-collateral design (a call's true intrinsic value is unbounded, but
+  // the pool never locks more than notional against it — see settlement).
+  const riskSummary = useMemo(() => {
+    if (mode !== "buy" || estimatedPremium === null || sizeRaw <= 0n) return null;
+    const strikeNum = Number(row.info.strike) / 10 ** priceDecimals;
+    const premiumPerUnitNum = quotePerUnit !== null ? Number(quotePerUnit) / 10 ** tokenDecimals : null;
+    const sizeNum = Number(sizeRaw) / 10 ** priceDecimals;
+    if (premiumPerUnitNum === null) return null;
+    const breakeven = side === "call" ? strikeNum + premiumPerUnitNum : strikeNum - premiumPerUnitNum;
+    const notional = strikeNum * sizeNum;
+    const premiumPaidNum = Number(estimatedPremium) / 10 ** tokenDecimals;
+    const maxGain = Math.max(0, notional - premiumPaidNum);
+    return { breakeven, maxLoss: premiumPaidNum, maxGain };
+  }, [mode, estimatedPremium, sizeRaw, row.info.strike, priceDecimals, quotePerUnit, tokenDecimals, side]);
 
   const expired = row.info.expiry <= BigInt(Math.floor(Date.now() / 1000));
   const positionSize = position?.size ?? 0n;
@@ -203,10 +223,46 @@ export function OrderForm({
           </span>
         </div>
         <div className="mt-2 flex items-center justify-between text-xs text-umbra-faint">
-          <span>{mode === "buy" ? "Max (2% slippage)" : "Min (2% slippage)"}</span>
+          <span>{mode === "buy" ? "Max" : "Min"} ({(Number(slippageBps) / 100).toFixed(1)}% slippage)</span>
           <span className="font-mono tabular">{bound !== null ? `${formatFixed(bound, tokenDecimals)} ${tokenSymbol}` : "—"}</span>
         </div>
+        <div className="mt-2 flex items-center gap-1.5">
+          {SLIPPAGE_PRESETS_BPS.map((bps) => (
+            <button
+              key={bps}
+              onClick={() => setSlippageBps(BigInt(bps))}
+              className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                Number(slippageBps) === bps
+                  ? "bg-umbra-violet/15 text-umbra-violet-glow"
+                  : "text-umbra-faint hover:text-umbra-muted"
+              }`}
+            >
+              {(bps / 100).toFixed(1)}%
+            </button>
+          ))}
+        </div>
       </div>
+
+      {riskSummary && (
+        <div className="rounded-lg border border-umbra-border-soft p-4 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="text-umbra-faint">Breakeven</span>
+            <span className="font-mono tabular text-umbra-ink">${riskSummary.breakeven.toFixed(4)}</span>
+          </div>
+          <div className="mt-1.5 flex items-center justify-between">
+            <span className="text-umbra-faint">Max loss</span>
+            <span className="font-mono tabular text-umbra-put">
+              -{riskSummary.maxLoss.toFixed(4)} {tokenSymbol}
+            </span>
+          </div>
+          <div className="mt-1.5 flex items-center justify-between">
+            <span className="text-umbra-faint">Max payout (capped at notional)</span>
+            <span className="font-mono tabular text-umbra-call">
+              {riskSummary.maxGain.toFixed(4)} {tokenSymbol}
+            </span>
+          </div>
+        </div>
+      )}
 
       {!wallet.connected ? (
         <Button className="w-full" onClick={wallet.connect} loading={wallet.connecting}>
