@@ -21,7 +21,8 @@ export async function getUserShares(address: string): Promise<bigint | null> {
       key,
       StellarSdk.rpc.Durability.Persistent,
     );
-    const val = entry.val.contractData().val();
+    if (!(entry.val instanceof StellarSdk.xdr.LedgerEntryDataContractData)) return null;
+    const val = entry.val.contractData.val;
     return toBig(StellarSdk.scValToNative(val) as bigint | number);
   } catch {
     return null;
