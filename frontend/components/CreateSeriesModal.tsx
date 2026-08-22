@@ -14,11 +14,11 @@ interface CreateSeriesModalProps {
   open: boolean;
   onClose: () => void;
   onSuccess: () => void;
-  tokenDecimals: number;
+  priceDecimals: number;
   underlyingSymbol: string;
 }
 
-export function CreateSeriesModal({ open, onClose, onSuccess, tokenDecimals, underlyingSymbol }: CreateSeriesModalProps) {
+export function CreateSeriesModal({ open, onClose, onSuccess, priceDecimals, underlyingSymbol }: CreateSeriesModalProps) {
   const wallet = useWallet();
   const { run, busy } = useTx();
   const [strike, setStrike] = useState("");
@@ -26,7 +26,10 @@ export function CreateSeriesModal({ open, onClose, onSuccess, tokenDecimals, und
 
   async function submit() {
     if (!wallet.address || !strike || !expiry) return;
-    const strikeRaw = parseFixed(strike, tokenDecimals);
+    // Strike must be in the oracle's own price scale, not the collateral
+    // token's — amm-pool compares it directly against oracle.get_price()'s
+    // spot value in Black-Scholes, so it has to share that scale exactly.
+    const strikeRaw = parseFixed(strike, priceDecimals);
     const expirySecs = BigInt(Math.floor(new Date(expiry).getTime() / 1000));
     await run(
       async () => {
@@ -51,7 +54,7 @@ export function CreateSeriesModal({ open, onClose, onSuccess, tokenDecimals, und
           will simply be rejected on-chain.
         </p>
         <div>
-          <label className="mb-1.5 block text-xs font-medium text-umbra-muted">Strike price (USDC)</label>
+          <label className="mb-1.5 block text-xs font-medium text-umbra-muted">Strike price ($)</label>
           <Input type="number" min="0" step="0.01" placeholder="e.g. 0.12" value={strike} onChange={(e) => setStrike(e.target.value)} />
         </div>
         <div>

@@ -75,7 +75,7 @@ function decodeEvent(
         id: ev.id,
         time,
         label: "New series",
-        detail: `#${toBig(seriesId)} · strike $${tokenAmt(strike)}`,
+        detail: `#${toBig(seriesId)} · strike $${priceScale(strike)}`,
         tone: "violet",
       };
     }

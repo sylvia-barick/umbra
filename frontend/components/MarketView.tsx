@@ -55,7 +55,7 @@ export function MarketView({
           series={series}
           loading={loading}
           selectedId={selected?.row.id ?? null}
-          tokenDecimals={tokenDecimals}
+          priceDecimals={priceDecimals}
           onSelect={(row) => onSelect(row, selected?.side ?? "call")}
           onCreateSeries={onCreateSeries}
         />

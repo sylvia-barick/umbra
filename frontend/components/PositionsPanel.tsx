@@ -137,7 +137,7 @@ export function PositionsPanel({
                 <Badge tone={p.sideLabel === "Call" ? "call" : "put"}>{p.sideLabel}</Badge>
                 <div>
                   <div className="font-mono text-sm tabular text-umbra-ink">
-                    {underlyingSymbol} {info ? `$${formatFixed(info.strike, tokenDecimals, 2)}` : ""} · #{p.seriesId.toString()}
+                    {underlyingSymbol} {info ? `$${formatFixed(info.strike, priceDecimals, 2)}` : ""} · #{p.seriesId.toString()}
                   </div>
                   <div className="mt-0.5 text-xs text-umbra-faint">
                     {formatFixed(p.size, priceDecimals)} {underlyingSymbol} · paid{" "}

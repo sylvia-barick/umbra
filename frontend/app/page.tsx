@@ -129,7 +129,7 @@ export default function Home() {
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         onSuccess={refresh}
-        tokenDecimals={tokenDecimals}
+        priceDecimals={priceDecimals}
         underlyingSymbol={underlyingSymbol}
       />
     </>

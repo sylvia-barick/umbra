@@ -26,7 +26,7 @@ export function TradeDrawer({ row, initialSide, onClose, onSuccess, ...formProps
     <Modal
       open={!!row}
       onClose={onClose}
-      title={`${formProps.underlyingSymbol} $${formatFixed(row.info.strike, formProps.tokenDecimals, 2)} · Series #${row.id}`}
+      title={`${formProps.underlyingSymbol} $${formatFixed(row.info.strike, formProps.priceDecimals, 2)} · Series #${row.id}`}
     >
       <OrderForm
         row={row}

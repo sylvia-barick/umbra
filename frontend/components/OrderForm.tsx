@@ -129,7 +129,7 @@ export function OrderForm({
       <div>
         <div className="mb-1 text-xs text-umbra-faint">Series #{row.id.toString()}</div>
         <div className="font-mono text-lg font-semibold tabular text-umbra-ink">
-          {underlyingSymbol} ${formatFixed(row.info.strike, tokenDecimals, 2)}
+          {underlyingSymbol} ${formatFixed(row.info.strike, priceDecimals, 2)}
         </div>
       </div>
 

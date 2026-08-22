@@ -8,14 +8,14 @@ interface StrikeRailProps {
   series: SeriesRow[];
   loading: boolean;
   selectedId: bigint | null;
-  tokenDecimals: number;
+  priceDecimals: number;
   onSelect: (row: SeriesRow) => void;
   onCreateSeries: () => void;
 }
 
 /** Contract selector strip — the row of instruments a perp DEX would list
  * under a symbol dropdown, flattened into a scrollable row of strikes. */
-export function StrikeRail({ series, loading, selectedId, tokenDecimals, onSelect, onCreateSeries }: StrikeRailProps) {
+export function StrikeRail({ series, loading, selectedId, priceDecimals, onSelect, onCreateSeries }: StrikeRailProps) {
   if (loading && series.length === 0) {
     return (
       <div className="flex gap-px overflow-x-auto border-t border-umbra-border bg-umbra-bg">
@@ -40,7 +40,7 @@ export function StrikeRail({ series, loading, selectedId, tokenDecimals, onSelec
             }`}
           >
             <span className={`font-mono text-sm font-semibold tabular ${active ? "text-umbra-violet-glow" : "text-umbra-ink"}`}>
-              ${formatFixed(row.info.strike, tokenDecimals, 2)}
+              ${formatFixed(row.info.strike, priceDecimals, 2)}
             </span>
             <span className={`text-[11px] ${expired ? "text-umbra-warn" : "text-umbra-faint"}`}>
               {expired ? "expired" : formatCountdown(row.info.expiry)}
