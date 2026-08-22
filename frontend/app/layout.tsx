@@ -24,7 +24,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <div className="relative flex min-h-screen flex-col">
             <Navbar />
             <TickerTape />
-            <main className="mx-auto w-full max-w-[1600px] flex-1 px-4 pb-24 pt-8 sm:px-6 lg:px-8">{children}</main>
+            <main className="mx-auto w-full max-w-[1760px] flex-1 px-3 pb-16 pt-3 sm:px-4">{children}</main>
             <footer className="border-t border-umbra-border-soft px-4 py-6 text-center text-xs text-umbra-faint sm:px-6 lg:px-8">
               Umbra · Soroban testnet MVP · full collateral, cash-settled, European exercise
             </footer>

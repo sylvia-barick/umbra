@@ -8,7 +8,7 @@ interface TabsProps<T extends string> {
 
 export function Tabs<T extends string>({ tabs, active, onChange }: TabsProps<T>) {
   return (
-    <div className="mb-6 flex gap-1 border-b border-umbra-border-soft">
+    <div className="mb-3 flex gap-1 border-b border-umbra-border-soft">
       {tabs.map((t) => (
         <button
           key={t.key}

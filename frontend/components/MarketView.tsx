@@ -7,7 +7,6 @@ import { TickerBar } from "@/components/TickerBar";
 import { TradingViewChart } from "@/components/TradingViewChart";
 import { StrikeRail } from "@/components/StrikeRail";
 import { OrderForm } from "@/components/OrderForm";
-import { Card, CardBody } from "@/components/ui/Card";
 
 interface MarketViewProps {
   series: SeriesRow[];
@@ -23,6 +22,12 @@ interface MarketViewProps {
   refreshKey: number;
 }
 
+/**
+ * Terminal-style trade layout: one bordered grid with hairline dividers
+ * between panels — chart, strikes, and the order form sit flush against
+ * each other, no floating cards or gutters, matching a perp-DEX trade page
+ * rather than a dashboard of widgets.
+ */
 export function MarketView({
   series,
   loading,
@@ -39,10 +44,10 @@ export function MarketView({
   const spot = useSpot(refreshKey);
 
   return (
-    <div className="grid grid-cols-1 gap-5 lg:grid-cols-[1fr_380px] lg:items-start">
-      <div className="min-w-0 space-y-4">
+    <div className="grid grid-cols-1 border border-umbra-border lg:grid-cols-[1fr_360px]">
+      <div className="min-w-0 border-b border-umbra-border lg:border-b-0 lg:border-r">
         <TickerBar underlyingSymbol={underlyingSymbol} priceDecimals={priceDecimals} spot={spot} />
-        <TradingViewChart symbol={tradingViewSymbol(underlyingSymbol)} />
+        <TradingViewChart symbol={tradingViewSymbol(underlyingSymbol)} height={560} />
         <StrikeRail
           series={series}
           loading={loading}
@@ -53,35 +58,31 @@ export function MarketView({
         />
       </div>
 
-      <div className="lg:sticky lg:top-24">
+      <div className="bg-umbra-panel lg:sticky lg:top-16 lg:self-start">
         {selected ? (
-          <Card>
-            <CardBody>
-              <OrderForm
-                key={selected.row.id.toString()}
-                row={selected.row}
-                initialSide={selected.side}
-                onSuccess={onTraded}
-                tokenSymbol={tokenSymbol}
-                tokenDecimals={tokenDecimals}
-                priceDecimals={priceDecimals}
-                underlyingSymbol={underlyingSymbol}
-              />
-            </CardBody>
-          </Card>
+          <div className="px-5 py-5">
+            <OrderForm
+              key={selected.row.id.toString()}
+              row={selected.row}
+              initialSide={selected.side}
+              onSuccess={onTraded}
+              tokenSymbol={tokenSymbol}
+              tokenDecimals={tokenDecimals}
+              priceDecimals={priceDecimals}
+              underlyingSymbol={underlyingSymbol}
+            />
+          </div>
         ) : (
-          <Card>
-            <CardBody className="flex flex-col items-center gap-3 py-14 text-center">
-              <p className="text-sm text-umbra-muted">
-                {loading ? "Loading series…" : "No series yet — create one to start trading."}
-              </p>
-              {!loading && (
-                <button onClick={onCreateSeries} className="text-sm font-medium text-umbra-violet-glow hover:underline">
-                  Create the first one →
-                </button>
-              )}
-            </CardBody>
-          </Card>
+          <div className="flex flex-col items-center gap-3 px-5 py-14 text-center">
+            <p className="text-sm text-umbra-muted">
+              {loading ? "Loading series…" : "No series yet — create one to start trading."}
+            </p>
+            {!loading && (
+              <button onClick={onCreateSeries} className="text-sm font-medium text-umbra-violet-glow hover:underline">
+                Create the first one →
+              </button>
+            )}
+          </div>
         )}
       </div>
     </div>
