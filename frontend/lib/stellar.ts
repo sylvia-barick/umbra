@@ -44,6 +44,7 @@ export const contracts = {
   optionsFactory: requireEnv("NEXT_PUBLIC_OPTIONS_FACTORY_ID", process.env.NEXT_PUBLIC_OPTIONS_FACTORY_ID),
   settlementKeeper: requireEnv("NEXT_PUBLIC_SETTLEMENT_KEEPER_ID", process.env.NEXT_PUBLIC_SETTLEMENT_KEEPER_ID),
   token: requireEnv("NEXT_PUBLIC_TOKEN_ADDR", process.env.NEXT_PUBLIC_TOKEN_ADDR),
+  reflector: requireEnv("NEXT_PUBLIC_REFLECTOR_ADDR", process.env.NEXT_PUBLIC_REFLECTOR_ADDR),
 };
 
 export const underlyingSymbol = process.env.NEXT_PUBLIC_UNDERLYING_SYMBOL || "XLM";

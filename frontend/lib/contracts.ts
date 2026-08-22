@@ -9,6 +9,19 @@ export type Side = { tag: "Call"; values: undefined } | { tag: "Put"; values: un
 export const CALL: Side = { tag: "Call", values: undefined };
 export const PUT: Side = { tag: "Put", values: undefined };
 
+/**
+ * Any Rust contract method declared `-> Result<T, Error>` decodes on the JS
+ * side to an `Ok<T>` instance (with a `.unwrap()` that returns T), not T
+ * itself — see stellar-sdk's `contract.Spec.funcResToNative`. A method with
+ * a plain (non-Result) return type decodes straight to T. This duck-types
+ * the difference so every `tx.result` read goes through one unwrap point
+ * instead of tracking, per method, which Rust signature it came from.
+ */
+export function unwrap<T>(result: T): T {
+  const maybeResult = result as unknown as { unwrap?: () => T };
+  return typeof maybeResult?.unwrap === "function" ? maybeResult.unwrap() : result;
+}
+
 export interface SeriesInfo {
   underlying: Asset;
   strike: bigint;
@@ -23,11 +36,11 @@ export interface Position {
 
 interface OracleAdapterContract {
   get_price: (
-    asset: Asset,
+    args: { asset: Asset },
     options?: contract.MethodOptions,
   ) => Promise<contract.AssembledTransaction<readonly [bigint, bigint]>>;
   get_realized_vol: (
-    asset: Asset,
+    args: { asset: Asset },
     options?: contract.MethodOptions,
   ) => Promise<contract.AssembledTransaction<number>>;
   decimals: (options?: contract.MethodOptions) => Promise<contract.AssembledTransaction<number>>;
@@ -99,6 +112,26 @@ interface TokenContract {
   symbol: (options?: contract.MethodOptions) => Promise<contract.AssembledTransaction<string>>;
 }
 
+export interface PriceData {
+  price: bigint;
+  timestamp: bigint;
+}
+
+/** SEP-40 Reflector's own public interface — read directly for chart history,
+ * since oracle-adapter only exposes a single averaged TWAP, not raw ticks. */
+interface ReflectorContract {
+  lastprice: (
+    args: { asset: Asset },
+    options?: contract.MethodOptions,
+  ) => Promise<contract.AssembledTransaction<PriceData | null>>;
+  prices: (
+    args: { asset: Asset; records: number },
+    options?: contract.MethodOptions,
+  ) => Promise<contract.AssembledTransaction<PriceData[] | null>>;
+  decimals: (options?: contract.MethodOptions) => Promise<contract.AssembledTransaction<number>>;
+  resolution: (options?: contract.MethodOptions) => Promise<contract.AssembledTransaction<number>>;
+}
+
 export type SignTransaction = contract.ClientOptions["signTransaction"];
 
 function baseOptions(contractId: string, publicKey?: string | null, signTransaction?: SignTransaction) {
@@ -161,4 +194,8 @@ export function settlementKeeperClient(publicKey?: string | null, signTransactio
 
 export function tokenClient(publicKey?: string | null, signTransaction?: SignTransaction) {
   return typedClient<TokenContract>(contracts.token, publicKey, signTransaction);
+}
+
+export function reflectorClient(publicKey?: string | null, signTransaction?: SignTransaction) {
+  return typedClient<ReflectorContract>(contracts.reflector, publicKey, signTransaction);
 }

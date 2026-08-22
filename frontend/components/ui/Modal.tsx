@@ -25,7 +25,7 @@ export function Modal({
   return (
     <div className="fixed inset-0 z-40 flex items-end justify-center sm:items-center">
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative z-10 w-full max-w-md animate-fade-up rounded-t-2xl border border-umbra-border bg-umbra-panel shadow-panel sm:rounded-2xl">
+      <div className="relative z-10 w-full max-w-md animate-fade-up rounded-t-3xl border border-umbra-border bg-umbra-panel shadow-panel sm:rounded-3xl">
         <div className="flex items-center justify-between border-b border-umbra-border-soft px-5 py-4">
           <h3 className="text-sm font-semibold text-umbra-ink">{title}</h3>
           <button onClick={onClose} className="rounded p-1 text-umbra-faint hover:text-umbra-ink" aria-label="Close">

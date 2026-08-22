@@ -12,7 +12,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
     <div className="relative">
       <input
         ref={ref}
-        className={`w-full rounded-lg border border-umbra-border bg-umbra-panel-raised px-3 py-2.5 text-sm text-umbra-ink tabular placeholder:text-umbra-faint focus:border-umbra-violet/60 focus:outline-none focus:ring-2 focus:ring-umbra-violet/20 ${suffix ? "pr-14" : ""} ${className}`}
+        className={`w-full rounded-xl border border-umbra-border bg-umbra-panel-raised px-3.5 py-2.5 text-sm text-umbra-ink tabular placeholder:text-umbra-faint focus:border-umbra-violet/60 focus:outline-none focus:ring-2 focus:ring-umbra-violet/20 ${suffix ? "pr-14" : ""} ${className}`}
         {...props}
       />
       {suffix && (

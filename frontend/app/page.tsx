@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useWallet } from "@/app/providers";
 import {
   SeriesRow,
@@ -12,10 +12,8 @@ import {
   usePositions,
 } from "@/hooks/useUmbraData";
 import { READ_ONLY_ACCOUNT } from "@/lib/stellar";
-import { Hero } from "@/components/Hero";
-import { StatsBar } from "@/components/StatsBar";
 import { Tabs } from "@/components/Tabs";
-import { SeriesGrid } from "@/components/SeriesGrid";
+import { MarketView } from "@/components/MarketView";
 import { TradeDrawer } from "@/components/TradeDrawer";
 import { VaultPanel } from "@/components/VaultPanel";
 import { PositionsPanel } from "@/components/PositionsPanel";
@@ -36,8 +34,26 @@ export default function Home() {
   const { positions, loading: loadingPositions } = usePositions(wallet.address, series, refreshKey);
 
   const [tab, setTab] = useState<TabKey>("markets");
-  const [trade, setTrade] = useState<{ row: SeriesRow; side: "call" | "put" } | null>(null);
+  const [selected, setSelected] = useState<{ row: SeriesRow; side: "call" | "put" } | null>(null);
+  const [manageTrade, setManageTrade] = useState<{ row: SeriesRow; side: "call" | "put" } | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+
+  // Keep the docked order panel pointed at a real series: default to the
+  // first one once the list loads, and follow along if the selected series
+  // disappears (e.g. a stale refresh) or the list order shifts.
+  useEffect(() => {
+    if (series.length === 0) {
+      setSelected(null);
+      return;
+    }
+    setSelected((prev) => {
+      if (prev && series.some((s) => s.id === prev.row.id)) {
+        const fresh = series.find((s) => s.id === prev.row.id)!;
+        return fresh === prev.row ? prev : { row: fresh, side: prev.side };
+      }
+      return { row: series[0], side: "call" };
+    });
+  }, [series]);
 
   const underlyingSymbol = underlyingAsset().values[0];
   const tokenSymbol = statics?.tokenSymbol ?? "USDC";
@@ -46,17 +62,6 @@ export default function Home() {
 
   return (
     <>
-      <Hero />
-      <StatsBar
-        underlyingSymbol={underlyingSymbol}
-        tokenSymbol={tokenSymbol}
-        sharePrice={sharePrice}
-        tokenDecimals={tokenDecimals}
-        seriesCount={series.length}
-        loadingSeries={loadingSeries}
-        loadingVault={loadingVault}
-      />
-
       <Tabs
         tabs={[
           { key: "markets", label: "Markets", count: series.length },
@@ -68,14 +73,18 @@ export default function Home() {
       />
 
       {tab === "markets" && (
-        <SeriesGrid
+        <MarketView
           series={series}
           loading={loadingSeries}
+          selected={selected}
+          onSelect={(row, side) => setSelected({ row, side })}
+          onCreateSeries={() => setCreateOpen(true)}
+          onTraded={refresh}
           tokenSymbol={tokenSymbol}
           tokenDecimals={tokenDecimals}
+          priceDecimals={priceDecimals}
           underlyingSymbol={underlyingSymbol}
-          onTrade={(row, side) => setTrade({ row, side })}
-          onCreateSeries={() => setCreateOpen(true)}
+          refreshKey={refreshKey}
         />
       )}
 
@@ -100,15 +109,15 @@ export default function Home() {
           tokenDecimals={tokenDecimals}
           priceDecimals={priceDecimals}
           underlyingSymbol={underlyingSymbol}
-          onOpenTrade={(row, side) => setTrade({ row, side })}
+          onOpenTrade={(row, side) => setManageTrade({ row, side })}
           onChanged={refresh}
         />
       )}
 
       <TradeDrawer
-        row={trade?.row ?? null}
-        initialSide={trade?.side ?? "call"}
-        onClose={() => setTrade(null)}
+        row={manageTrade?.row ?? null}
+        initialSide={manageTrade?.side ?? "call"}
+        onClose={() => setManageTrade(null)}
         onSuccess={refresh}
         tokenSymbol={tokenSymbol}
         tokenDecimals={tokenDecimals}

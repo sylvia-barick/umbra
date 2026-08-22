@@ -4,6 +4,7 @@ import "./globals.css";
 import { Providers } from "./providers";
 import { Navbar } from "@/components/Navbar";
 import { Toaster } from "@/components/Toaster";
+import { TickerTape } from "@/components/TickerTape";
 
 const sans = Inter({ subsets: ["latin"], variable: "--font-sans", display: "swap" });
 const mono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-mono", display: "swap" });
@@ -22,7 +23,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <Providers>
           <div className="relative flex min-h-screen flex-col">
             <Navbar />
-            <main className="mx-auto w-full max-w-6xl flex-1 px-4 pb-24 pt-8 sm:px-6 lg:px-8">{children}</main>
+            <TickerTape />
+            <main className="mx-auto w-full max-w-[1600px] flex-1 px-4 pb-24 pt-8 sm:px-6 lg:px-8">{children}</main>
             <footer className="border-t border-umbra-border-soft px-4 py-6 text-center text-xs text-umbra-faint sm:px-6 lg:px-8">
               Umbra · Soroban testnet MVP · full collateral, cash-settled, European exercise
             </footer>

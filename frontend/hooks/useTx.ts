@@ -3,6 +3,7 @@
 import { useCallback, useState } from "react";
 import { useToasts } from "@/app/providers";
 import { config } from "@/lib/stellar";
+import { unwrap } from "@/lib/contracts";
 
 interface RunOptions {
   pendingTitle: string;
@@ -28,7 +29,7 @@ export function useTx() {
           detail: hash ? `Tx ${hash.slice(0, 10)}…` : undefined,
           href: hash ? `https://stellar.expert/explorer/${config.networkPassphrase.includes("Test") ? "testnet" : "public"}/tx/${hash}` : undefined,
         });
-        return sent.result;
+        return unwrap(sent.result);
       } catch (e) {
         update(toastId, {
           kind: "error",

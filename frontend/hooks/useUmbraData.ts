@@ -10,6 +10,7 @@ import {
   Side,
   SeriesInfo,
   tokenClient,
+  unwrap,
   vaultAccountingClient,
 } from "@/lib/contracts";
 import { READ_ONLY_ACCOUNT, underlyingAssetNative } from "@/lib/stellar";
@@ -29,7 +30,7 @@ const MAX_SERIES_PROBE = 50;
 async function fetchQuote(readAddr: string, seriesId: bigint, side: Side): Promise<bigint> {
   const client = await ammPoolClient(readAddr);
   const tx = await client.quote({ series_id: seriesId, side });
-  return toBig(tx.result);
+  return toBig(unwrap(tx.result));
 }
 
 /** Normalizes a decoded SeriesInfo's numeric fields — see `toBig`. */
@@ -111,7 +112,7 @@ export function useSeriesList(readAddr: string, refreshKey: number) {
       for (let id = 1n; id <= BigInt(MAX_SERIES_PROBE); id++) {
         try {
           const tx = await factory.get_series({ series_id: id });
-          const row = await fetchSeriesRow(readAddr, id, tx.result);
+          const row = await fetchSeriesRow(readAddr, id, unwrap(tx.result));
           if (cancelled) return;
           rows.push(row);
           setSeries([...rows].sort((a, b) => Number(a.info.expiry - b.info.expiry)));

@@ -14,13 +14,17 @@ const config: Config = {
           ink: "#e9eaef",
           muted: "#8b8fa0",
           faint: "#5c6070",
+          // Named "violet" for historical reasons, now carrying the
+          // signature bright green pulled from design.md's extracted
+          // palette (a Hyperliquid-style trading-terminal accent) — kept
+          // the token name to avoid a mass rename across every component.
           violet: {
-            DEFAULT: "#8b7bff",
-            soft: "#443b7a",
-            glow: "#a596ff",
+            DEFAULT: "#18d26e",
+            soft: "#123524",
+            glow: "#79efbd",
           },
-          call: "#3ddc97",
-          put: "#ff6b81",
+          call: "#18d26e",
+          put: "#ff5c72",
           warn: "#f2b84b",
         },
       },
@@ -29,12 +33,12 @@ const config: Config = {
         mono: ["var(--font-mono)", "ui-monospace", "SFMono-Regular", "monospace"],
       },
       boxShadow: {
-        glow: "0 0 0 1px rgba(139,123,255,0.15), 0 8px 30px -8px rgba(139,123,255,0.35)",
+        glow: "0 0 0 1px rgba(24,210,110,0.18), 0 8px 30px -8px rgba(24,210,110,0.35)",
         panel: "0 1px 0 0 rgba(255,255,255,0.02) inset, 0 12px 40px -20px rgba(0,0,0,0.6)",
       },
       backgroundImage: {
         "umbra-radial":
-          "radial-gradient(80% 60% at 50% -10%, rgba(139,123,255,0.16) 0%, rgba(139,123,255,0) 60%)",
+          "radial-gradient(80% 60% at 50% -10%, rgba(24,210,110,0.14) 0%, rgba(24,210,110,0) 60%)",
         "umbra-grid":
           "linear-gradient(to right, rgba(255,255,255,0.035) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.035) 1px, transparent 1px)",
       },

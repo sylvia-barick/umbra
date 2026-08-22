@@ -7,7 +7,7 @@ type Size = "sm" | "md" | "lg";
 
 const variantClasses: Record<Variant, string> = {
   primary:
-    "bg-umbra-violet text-white shadow-glow hover:bg-umbra-violet-glow disabled:bg-umbra-violet/40 disabled:shadow-none",
+    "bg-umbra-violet text-black shadow-glow hover:bg-umbra-violet-glow disabled:bg-umbra-violet/40 disabled:text-black/60 disabled:shadow-none",
   secondary:
     "bg-umbra-panel-raised text-umbra-ink border border-umbra-border hover:border-umbra-violet/50 hover:bg-white/[0.04] disabled:opacity-40",
   ghost: "bg-transparent text-umbra-muted hover:text-umbra-ink hover:bg-white/[0.04] disabled:opacity-40",
@@ -36,7 +36,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
     <button
       ref={ref}
       disabled={disabled || loading}
-      className={`inline-flex items-center justify-center whitespace-nowrap rounded-lg font-medium transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-umbra-violet/50 disabled:cursor-not-allowed active:scale-[0.98] ${variantClasses[variant]} ${sizeClasses[size]} ${className}`}
+      className={`inline-flex items-center justify-center whitespace-nowrap rounded-xl font-semibold tracking-tight transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-umbra-violet/50 disabled:cursor-not-allowed active:scale-[0.98] ${variantClasses[variant]} ${sizeClasses[size]} ${className}`}
       {...props}
     >
       {loading && (

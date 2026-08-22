@@ -3,8 +3,8 @@ export function UmbraMark({ className = "" }: { className?: string }) {
     <svg viewBox="0 0 32 32" fill="none" className={className} aria-hidden="true">
       <defs>
         <linearGradient id="umbra-mark-grad" x1="4" y1="4" x2="28" y2="28" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#a596ff" />
-          <stop offset="100%" stopColor="#5c4fd6" />
+          <stop offset="0%" stopColor="#79efbd" />
+          <stop offset="100%" stopColor="#0e9a52" />
         </linearGradient>
       </defs>
       <circle cx="16" cy="16" r="15" fill="url(#umbra-mark-grad)" opacity="0.16" />
