@@ -2,11 +2,13 @@
 
 import { SeriesRow } from "@/hooks/useUmbraData";
 import { useSpot } from "@/hooks/useSpot";
+import { useActivity } from "@/hooks/useActivity";
 import { tradingViewSymbol } from "@/lib/tradingview";
 import { TickerBar } from "@/components/TickerBar";
 import { TradingViewChart } from "@/components/TradingViewChart";
 import { StrikeRail } from "@/components/StrikeRail";
 import { OrderForm } from "@/components/OrderForm";
+import { ActivityFeed } from "@/components/ActivityFeed";
 
 interface MarketViewProps {
   series: SeriesRow[];
@@ -42,6 +44,7 @@ export function MarketView({
   refreshKey,
 }: MarketViewProps) {
   const spot = useSpot(refreshKey);
+  const activity = useActivity(tokenDecimals, priceDecimals, refreshKey);
 
   return (
     <div className="grid grid-cols-1 border border-umbra-border lg:grid-cols-[1fr_360px]">
@@ -56,6 +59,7 @@ export function MarketView({
           onSelect={(row) => onSelect(row, selected?.side ?? "call")}
           onCreateSeries={onCreateSeries}
         />
+        <ActivityFeed items={activity.items} loading={activity.loading} />
       </div>
 
       <div className="bg-umbra-panel lg:sticky lg:top-16 lg:self-start">

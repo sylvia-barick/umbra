@@ -70,6 +70,15 @@ export function shortAddr(addr: string, lead = 4, tail = 4): string {
   return `${addr.slice(0, lead)}…${addr.slice(-tail)}`;
 }
 
+/** Like formatFixed, but always prefixes a +/- sign — for P&L and other
+ * deltas where the sign itself is the information, not just the magnitude. */
+export function formatSigned(value: bigint | number, decimals: number, maxFrac = 4): string {
+  const big = typeof value === "bigint" ? value : BigInt(Math.trunc(value));
+  const formatted = formatFixed(big, decimals, maxFrac);
+  if (big > 0n) return `+${formatted}`;
+  return formatted;
+}
+
 export function formatBps(bps: number): string {
   return `${(bps / 100).toFixed(bps % 100 === 0 ? 0 : 2)}%`;
 }

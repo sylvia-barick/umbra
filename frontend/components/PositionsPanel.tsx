@@ -1,9 +1,10 @@
 "use client";
 
+import { useMemo } from "react";
 import { useWallet } from "@/app/providers";
 import { SeriesRow } from "@/hooks/useUmbraData";
 import { settlementKeeperClient } from "@/lib/contracts";
-import { formatFixed } from "@/lib/format";
+import { formatFixed, formatSigned } from "@/lib/format";
 import { useTx } from "@/hooks/useTx";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
@@ -28,6 +29,23 @@ interface PositionsPanelProps {
   onChanged: () => void;
 }
 
+/** Marks a position to the AMM's own current quote for that series/side —
+ * "what it would fetch if sold right now", the same number the trade panel
+ * already shows, not a separate valuation model. Null when no live quote
+ * is available yet (e.g. InsufficientHistory) rather than a misleading 0. */
+function markToMarket(
+  p: PositionRow,
+  info: SeriesRow | undefined,
+  priceDecimals: number,
+): { value: bigint; pnl: bigint } | null {
+  if (!info) return null;
+  const quote = p.sideLabel === "Call" ? info.callQuote : info.putQuote;
+  if (quote === null) return null;
+  const priceScale = 10n ** BigInt(priceDecimals);
+  const value = (quote * p.size) / priceScale;
+  return { value, pnl: value - p.premiumPaid };
+}
+
 export function PositionsPanel({
   positions,
   loading,
@@ -41,6 +59,23 @@ export function PositionsPanel({
 }: PositionsPanelProps) {
   const wallet = useWallet();
   const { run, busy } = useTx();
+
+  const rows = useMemo(
+    () =>
+      positions.map((p) => {
+        const row = series.find((s) => s.id === p.seriesId);
+        return { p, row, mtm: markToMarket(p, row, priceDecimals) };
+      }),
+    [positions, series, priceDecimals],
+  );
+
+  const totals = useMemo(() => {
+    const withMtm = rows.filter((r) => r.mtm !== null);
+    if (withMtm.length === 0) return null;
+    const pnl = withMtm.reduce((sum, r) => sum + r.mtm!.pnl, 0n);
+    const cost = withMtm.reduce((sum, r) => sum + r.p.premiumPaid, 0n);
+    return { pnl, cost, partial: withMtm.length < rows.length };
+  }, [rows]);
 
   if (!wallet.connected) {
     return (
@@ -83,10 +118,18 @@ export function PositionsPanel({
     <Card>
       <CardHeader>
         <h3 className="text-sm font-semibold text-umbra-ink">Your positions</h3>
+        {totals && (
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-umbra-faint">Unrealized P&L{totals.partial ? " (partial)" : ""}</span>
+            <span className={`font-mono font-semibold tabular ${totals.pnl >= 0n ? "text-umbra-call" : "text-umbra-put"}`}>
+              {formatSigned(totals.pnl, tokenDecimals)} {tokenSymbol}
+            </span>
+          </div>
+        )}
       </CardHeader>
       <div className="divide-y divide-umbra-border-soft">
-        {positions.map((p) => {
-          const info = series.find((s) => s.id === p.seriesId)?.info;
+        {rows.map(({ p, row, mtm }) => {
+          const info = row?.info;
           const expired = info ? info.expiry <= now : false;
           return (
             <div key={`${p.seriesId}-${p.sideLabel}`} className="flex items-center justify-between gap-4 px-5 py-4">
@@ -102,7 +145,17 @@ export function PositionsPanel({
                   </div>
                 </div>
               </div>
-              <div className="shrink-0">
+              <div className="flex shrink-0 items-center gap-4">
+                {mtm && (
+                  <div className="text-right">
+                    <div className="font-mono text-sm tabular text-umbra-ink">
+                      {formatFixed(mtm.value, tokenDecimals)} {tokenSymbol}
+                    </div>
+                    <div className={`text-xs font-medium tabular ${mtm.pnl >= 0n ? "text-umbra-call" : "text-umbra-put"}`}>
+                      {formatSigned(mtm.pnl, tokenDecimals)}
+                    </div>
+                  </div>
+                )}
                 {expired ? (
                   <Button size="sm" variant="secondary" loading={busy} onClick={() => settle(p.seriesId)}>
                     Settle
@@ -112,7 +165,6 @@ export function PositionsPanel({
                     size="sm"
                     variant="secondary"
                     onClick={() => {
-                      const row = series.find((s) => s.id === p.seriesId);
                       if (row) onOpenTrade(row, p.sideLabel === "Call" ? "call" : "put");
                     }}
                   >
